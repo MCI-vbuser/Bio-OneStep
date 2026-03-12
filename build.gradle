@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.vbuser'
+version = '1.0-SNAPSHOT'
+
+allprojects {
+    tasks.withType(JavaCompile).tap {
+        configureEach {
+            options.encoding = "UTF-8"
+        }
+    }
+}
+
+repositories {
+    maven { url = 'https://maven.aliyun.com/repository/public/' }
+    maven { url = 'https://maven.aliyun.com/repository/central' }
+    mavenCentral()
+}
+
+jar{
+    manifest {
+        attributes 'Main-Class': 'com.vbuser.Main'
+    }
+    from {
+        configurations.runtimeClasspath.collect( { it.isDirectory() ? it : zipTree(it) })
+    }
+}
