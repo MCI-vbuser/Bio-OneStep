@@ -1,9 +1,7 @@
 package com.vbuser;
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
@@ -16,6 +14,11 @@ public class Main {
     private static final String MINICONDA_INSTALL_PATH = System.getProperty("user.home") + "/miniconda3";
     private static final String MINICONDA_INSTALLER = "Miniconda3-latest-Linux-x86_64.sh";
     private static final String MINICONDA_URL = "https://repo.anaconda.com/miniconda/" + MINICONDA_INSTALLER;
+
+    // 用于存放源码安装的 sra-toolkit bin 目录，便于后续命令直接使用
+    private static String extraBinPath = null;
+
+    static boolean ignored;
 
     public static void main(String[] args) {
         envCheck();
@@ -63,8 +66,288 @@ public class Main {
             System.err.println("错误：安装依赖包失败。");
             return;
         }
+
+        // 7. 检查并安装 sra-toolkit
+        if (!checkAndInstallSraToolkit()) {
+            System.err.println("警告：sra-toolkit 安装失败，后续可能需要手动安装。");
+        } else {
+            System.out.println("sra-toolkit 已就绪。");
+        }
+
         System.out.println("环境配置完成！");
     }
+
+    // ==================== 新增：sra-toolkit 检测与安装 ====================
+
+    /**
+     * 检查 sra-toolkit 是否可用，若不可用则尝试安装（apt 或源码）
+     */
+    private static boolean checkAndInstallSraToolkit() {
+        String userHome = System.getProperty("user.home");
+
+        // 检查是否已有通过源码安装的版本（例如上次运行留下的 sratoolkit-current）
+        File possibleBin = new File(userHome + "/sratoolkit-current/bin/prefetch");
+        if (possibleBin.exists() && possibleBin.canExecute()) {
+            extraBinPath = userHome + "/sratoolkit-current/bin";
+            System.out.println("sra-toolkit 已安装 (通过源码，位于 " + extraBinPath + ")");
+            return true;
+        }
+
+        // 检查系统 PATH 中是否有 prefetch
+        if (checkCommand("prefetch")) {
+            System.out.println("sra-toolkit 已安装 (prefetch 在系统 PATH 中)。");
+            return true;
+        }
+
+        System.out.println("未找到 sra-toolkit，开始安装...");
+
+        // 尝试使用 sudo apt 安装
+        if (attemptSudoAptInstall()) {
+            // 再次检查 prefetch
+            if (checkCommand("prefetch")) {
+                System.out.println("通过 apt 安装 sra-toolkit 成功。");
+                return true;
+            } else {
+                System.out.println("apt 安装可能未成功，将尝试源码安装。");
+            }
+        } else {
+            System.out.println("无法使用 apt 安装，将尝试源码安装。");
+        }
+
+        // 源码安装
+        return installSraToolkitFromSource();
+    }
+
+    /**
+     * 尝试使用 sudo apt 安装 sra-toolkit（支持交互式密码输入）
+     */
+    private static boolean attemptSudoAptInstall() {
+        boolean isRoot = "root".equals(System.getProperty("user.name"));
+        if (isRoot) {
+            System.out.println("当前用户为 root，直接执行 apt install...");
+            return runCommand("apt", "install", "-y", "sra-toolkit");
+        } else {
+            // 先尝试无密码 sudo
+            if (runShellCommandQuiet("sudo -n true")) {
+                System.out.println("检测到无密码 sudo，尝试使用 sudo apt install...");
+                return runCommand("sudo", "apt", "install", "-y", "sra-toolkit");
+            } else {
+                // 需要密码：使用 inheritIO 让用户直接在终端输入密码
+                System.out.println("需要密码的 sudo，正在弹出密码提示（请在终端中输入密码）...");
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("sudo", "apt", "install", "-y", "sra-toolkit");
+                    pb.inheritIO(); // 将子进程的输入输出连接到当前 Java 进程的终端
+                    Process p = pb.start();
+                    int exitCode = p.waitFor();
+                    if (exitCode == 0) {
+                        return true;
+                    } else {
+                        System.err.println("sudo apt 安装失败，退出码: " + exitCode);
+                        return false;
+                    }
+                } catch (Exception e) {
+                    System.err.println("执行 sudo apt 时发生异常: " + e.getMessage());
+                    return false;
+                }
+            }
+        }
+    }
+
+    /**
+     * 从源码编译安装 sra-toolkit：下载、解压、创建软链接，并设置 extraBinPath
+     */
+    private static boolean installSraToolkitFromSource() {
+        String userHome = System.getProperty("user.home");
+        String downloadUrl = "http://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/current/sratoolkit.current-ubuntu64.tar.gz";
+        String tarFileName = "sratoolkit.current-ubuntu64.tar.gz";
+
+        // 检查下载工具
+        boolean useWget = checkCommand("wget");
+        boolean useCurl = checkCommand("curl");
+        if (!useWget && !useCurl) {
+            System.err.println("错误：系统中未找到 wget 或 curl，无法下载 sra-toolkit。");
+            return false;
+        }
+
+        String downloadCmd;
+        if (useWget) {
+            downloadCmd = "wget -q -O " + tarFileName + " " + downloadUrl;
+        } else {
+            downloadCmd = "curl -s -o " + tarFileName + " " + downloadUrl;
+        }
+
+        System.out.println("下载 sra-toolkit 源码包...");
+        if (!runShellCommandQuiet(downloadCmd)) {
+            System.err.println("下载失败，请检查网络连接。");
+            return false;
+        }
+        System.out.println("下载完成。");
+
+        // 解压到用户主目录
+        System.out.println("解压中...");
+        String extractCmd = "tar -xzf " + tarFileName + " -C " + userHome;
+        if (!runShellCommandQuiet(extractCmd)) {
+            System.err.println("解压失败。");
+            ignored = new File(tarFileName).delete();
+            return false;
+        }
+        System.out.println("解压完成。");
+
+        // 查找解压后的目录名（格式如 sratoolkit.3.0.0-ubuntu64）
+        File homeDir = new File(userHome);
+        File[] sraDirs = homeDir.listFiles((dir, name) -> name.startsWith("sratoolkit.") && name.endsWith("-ubuntu64"));
+        if (sraDirs == null || sraDirs.length == 0) {
+            System.err.println("无法找到解压后的 sratoolkit 目录。");
+            ignored = new File(tarFileName).delete();
+            return false;
+        }
+        File sraDir = sraDirs[0]; // 通常只有一个
+        String sraDirPath = sraDir.getAbsolutePath();
+
+        // 创建软链接 ~/sratoolkit-current 指向该目录
+        String linkPath = userHome + "/sratoolkit-current";
+        File linkFile = new File(linkPath);
+        if (linkFile.exists()) {
+            if (!linkFile.delete()) {
+                System.err.println("警告：无法删除已有的软链接 " + linkPath);
+            }
+        }
+        String lnCmd = "ln -s " + sraDirPath + " " + linkPath;
+        if (!runShellCommandQuiet(lnCmd)) {
+            System.err.println("创建软链接失败。");
+            ignored = new File(tarFileName).delete();
+            return false;
+        }
+
+        // 设置 extraBinPath 为该软链接下的 bin 目录
+        extraBinPath = linkPath + "/bin";
+
+        // 清理下载的 tar 文件
+        ignored = new File(tarFileName).delete();
+
+        // 验证 prefetch 是否可用（此时 extraBinPath 已生效）
+        System.out.println("验证安装...");
+        if (runCommand("prefetch", "--version")) {
+            System.out.println("sra-toolkit 源码安装成功。");
+            return true;
+        } else {
+            System.err.println("警告：prefetch 命令仍不可用，安装可能有问题。");
+            return false;
+        }
+    }
+
+    // ==================== 修改原有命令执行方法，支持 extraBinPath ====================
+
+    /**
+     * 执行任意命令，设置环境变量，打印输出（已支持 extraBinPath）
+     */
+    private static boolean runCommand(String... cmdarray) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmdarray);
+            // 将 extraBinPath 添加到 PATH 环境变量
+            if (extraBinPath != null) {
+                Map<String, String> env = pb.environment();
+                env.merge("PATH", extraBinPath, (a, b) -> b + ":" + a);
+            }
+            pb.redirectErrorStream(true);
+            pb.environment().put("CONDA_ALWAYS_YES", "true");
+            pb.environment().put("CONDA_TERMS_OF_SERVICE_ACCEPT", "true");
+            Process p = pb.start();
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    System.out.println("[exec] " + line);
+                }
+            }
+
+            int exitCode = p.waitFor();
+            if (exitCode != 0) {
+                System.err.println("命令执行失败，退出码: " + exitCode + "，命令: " + String.join(" ", cmdarray));
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            System.err.println("执行命令时发生异常: " + String.join(" ", cmdarray));
+            return false;
+        }
+    }
+
+    /**
+     * 静默执行命令，设置环境变量（已支持 extraBinPath）
+     */
+    private static boolean runCommandQuiet(String... cmdarray) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmdarray);
+            if (extraBinPath != null) {
+                Map<String, String> env = pb.environment();
+                env.merge("PATH", extraBinPath, (a, b) -> b + ":" + a);
+            }
+            pb.redirectOutput(new File("/dev/null"));
+            pb.redirectError(new File("/dev/null"));
+            pb.environment().put("CONDA_ALWAYS_YES", "true");
+            pb.environment().put("CONDA_TERMS_OF_SERVICE_ACCEPT", "true");
+            Process p = pb.start();
+            int exitCode = p.waitFor();
+            if (exitCode != 0) {
+                System.err.println("命令执行失败，退出码: " + exitCode + "，命令: " + String.join(" ", cmdarray));
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            System.err.println("执行命令时发生异常: " + String.join(" ", cmdarray));
+            return false;
+        }
+    }
+
+    /**
+     * 执行 shell 命令，返回是否成功（不重定向输出，用于调试）（已支持 extraBinPath）
+     */
+    private static boolean runShellCommand(String command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+            if (extraBinPath != null) {
+                Map<String, String> env = pb.environment();
+                env.merge("PATH", extraBinPath, (a, b) -> b + ":" + a);
+            }
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    System.out.println("[tos] " + line);
+                }
+            }
+            int exitCode = p.waitFor();
+            return exitCode != 0;
+        } catch (Exception e) {
+            System.err.println("执行命令失败: " + command);
+            return true;
+        }
+    }
+
+    /**
+     * 静默执行 shell 命令（已支持 extraBinPath）
+     */
+    private static boolean runShellCommandQuiet(String command) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+            if (extraBinPath != null) {
+                Map<String, String> env = pb.environment();
+                env.merge("PATH", extraBinPath, (a, b) -> b + ":" + a);
+            }
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(new File("/dev/null"));
+            pb.redirectError(new File("/dev/null"));
+            Process p = pb.start();
+            int exitCode = p.waitFor();
+            return exitCode == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ==================== 以下为原有方法（未修改，仅保持完整性） ====================
 
     /**
      * 初始化 Conda（执行 conda init）
@@ -201,45 +484,6 @@ public class Main {
         return allAccepted;
     }
 
-    /**
-     * 执行 shell 命令，返回是否成功（不重定向输出，用于调试）
-     */
-    private static boolean runShellCommand(String command) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    System.out.println("[tos] " + line);
-                }
-            }
-            int exitCode = p.waitFor();
-            return exitCode != 0;
-        } catch (Exception e) {
-            System.err.println("执行命令失败: " + command);
-            return true;
-        }
-    }
-
-    /**
-     * 静默执行 shell 命令
-     */
-    private static boolean runShellCommandQuiet(String command) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
-            pb.redirectErrorStream(true);
-            pb.redirectOutput(new File("/dev/null"));
-            pb.redirectError(new File("/dev/null"));
-            Process p = pb.start();
-            int exitCode = p.waitFor();
-            return exitCode == 0;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private static boolean checkCommand(String cmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder("which", cmd);
@@ -247,59 +491,6 @@ public class Main {
             Process p = pb.start();
             return p.waitFor() == 0;
         } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * 执行任意命令，设置环境变量，打印输出
-     */
-    private static boolean runCommand(String... cmdarray) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(cmdarray);
-            pb.redirectErrorStream(true);
-            pb.environment().put("CONDA_ALWAYS_YES", "true");
-            pb.environment().put("CONDA_TERMS_OF_SERVICE_ACCEPT", "true");
-            Process p = pb.start();
-
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    System.out.println("[exec] " + line);
-                }
-            }
-
-            int exitCode = p.waitFor();
-            if (exitCode != 0) {
-                System.err.println("命令执行失败，退出码: " + exitCode + "，命令: " + String.join(" ", cmdarray));
-                return false;
-            }
-            return true;
-        } catch (Exception e) {
-            System.err.println("执行命令时发生异常: " + String.join(" ", cmdarray));
-            return false;
-        }
-    }
-
-    /**
-     * 静默执行命令，设置环境变量
-     */
-    private static boolean runCommandQuiet(String... cmdarray) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(cmdarray);
-            pb.redirectOutput(new File("/dev/null"));
-            pb.redirectError(new File("/dev/null"));
-            pb.environment().put("CONDA_ALWAYS_YES", "true");
-            pb.environment().put("CONDA_TERMS_OF_SERVICE_ACCEPT", "true");
-            Process p = pb.start();
-            int exitCode = p.waitFor();
-            if (exitCode != 0) {
-                System.err.println("命令执行失败，退出码: " + exitCode + "，命令: " + String.join(" ", cmdarray));
-                return false;
-            }
-            return true;
-        } catch (Exception e) {
-            System.err.println("执行命令时发生异常: " + String.join(" ", cmdarray));
             return false;
         }
     }
