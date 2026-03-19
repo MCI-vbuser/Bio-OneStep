@@ -3,8 +3,8 @@ package com.vbuser.pre;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 
-import static com.vbuser.Main.findOrInstallConda;
-import static com.vbuser.Main.runCondaCommand;
+import static com.vbuser.pre.CommonEnv.findOrInstallConda;
+import static com.vbuser.pre.CommonEnv.runCondaCommand;
 
 public class Meme {
     /**
@@ -51,39 +51,37 @@ public class Meme {
     /**
      * 在 meme_env 环境中安装 meme
      */
-    private static boolean installMeme(String condaExec) {
+    private static void installMeme(String condaExec) {
         System.out.println("安装 meme 到 meme_env...");
-        return runCondaCommand(condaExec, true, "install", "-n", "meme_env", "-c", "bioconda", "meme");
+        runCondaCommand(condaExec, true, "install", "-n", "meme_env", "-c", "bioconda", "meme");
     }
 
     /**
      * 创建 meme_env 环境（Python 3.6）并安装 meme
      * 若环境已存在则检查 meme 是否已安装，若未安装则进行安装
-     * @return true 表示环境准备成功，false 表示失败
      */
-    public static boolean createMemeEnv() {
+    public static void createMemeEnv() {
         String condaExec = findOrInstallConda();
         if (condaExec == null) {
             System.err.println("错误：无法找到或安装 Conda，无法创建 meme_env。");
-            return false;
+            return;
         }
 
         if (condaEnvExists(condaExec)) {
             System.out.println("环境 meme_env 已存在。");
             if (!isPackageInstalled(condaExec)) {
                 System.out.println("meme 未安装，开始安装...");
-                return installMeme(condaExec);
+                installMeme(condaExec);
             } else {
                 System.out.println("meme 已安装，无需操作。");
-                return true;
             }
         } else {
             System.out.println("创建环境 meme_env (Python 3.6)...");
             if (!createCondaEnv(condaExec)) {
                 System.err.println("错误：创建环境失败。");
-                return false;
+                return;
             }
-            return installMeme(condaExec);
+            installMeme(condaExec);
         }
     }
 }
