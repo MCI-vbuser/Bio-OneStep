@@ -1,5 +1,7 @@
 package com.vbuser;
 
+import com.vbuser.pre.Meme;
+
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -73,6 +75,8 @@ public class Main {
         } else {
             System.out.println("sra-toolkit 已就绪。");
         }
+
+        Meme.createMemeEnv();
 
         System.out.println("环境配置完成！");
     }
@@ -360,7 +364,7 @@ public class Main {
     /**
      * 查找系统 Conda，若找不到则静默安装 Miniconda
      */
-    private static String findOrInstallConda() {
+    public static String findOrInstallConda() {
         if (isCondaAvailable("conda")) {
             return "conda";
         }
@@ -498,7 +502,7 @@ public class Main {
     /**
      * 执行 conda 命令，自动添加 -y
      */
-    private static boolean runCondaCommand(String condaExec, boolean quiet, String... args) {
+    public static boolean runCondaCommand(String condaExec, boolean quiet, String... args) {
         List<String> cmdList = new ArrayList<>();
         cmdList.add(condaExec);
 
