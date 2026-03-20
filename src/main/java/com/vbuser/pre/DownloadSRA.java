@@ -1,5 +1,7 @@
 package com.vbuser.pre;
 
+import com.vbuser.WebConsole;
+
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -11,7 +13,7 @@ public class DownloadSRA {
     public static void download(String sra_txt) {
         String[] sra = phrase(sra_txt.replaceAll(" ", ""));
         System.out.println("是否确认下载如下SRA文件: " + Arrays.toString(sra) + "? [y|n]");
-        String input = System.console().readLine();
+        String input = WebConsole.readLine();
         if ("y".equals(input)) {
             String sraString = String.join("\n", sra);
             writeString2Txt(sraString);
