@@ -13,12 +13,15 @@ import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class WebConsole {
 
     private static final int PORT = 11451;
+    private static HttpServer server;  // 保存服务器引用，用于关闭
 
     public static void start() throws IOException {
         // 1. 重定向 System.out 到网页 + 原始控制台
@@ -28,15 +31,38 @@ public class WebConsole {
         // 3. 启动系统监控后台线程
         SystemMonitor.start();
 
-        // 4. 启动 HTTP 服务器
-        HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
+        // 4. 启动 HTTP 服务器（设置守护线程池）
+        server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.createContext("/", new WebHandler());
         server.createContext("/logs", new LogsHandler());
         server.createContext("/input", new InputHandler());
         server.createContext("/stats", new StatsHandler());
-        server.setExecutor(Executors.newCachedThreadPool());
+        server.createContext("/stop", new StopHandler());  // 新增终止端点
+
+        // 使用守护线程池，主线程结束后 JVM 自动退出
+        server.setExecutor(Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setDaemon(true);
+            return t;
+        }));
         server.start();
         System.out.println("Web Console started at http://localhost:" + PORT);
+    }
+
+    /**
+     * 终止整个进程（强制退出）
+     */
+    public static void killProcess() {
+        System.exit(0);
+    }
+
+    /**
+     * 停止 HTTP 服务器（不退出 JVM）
+     */
+    public static void stopServer() {
+        if (server != null) {
+            server.stop(0);
+        }
     }
 
     /**
@@ -117,18 +143,66 @@ public class WebConsole {
 
     // ========== 输入重定向 ==========
     static class InputRedirect {
-        private static PipedOutputStream pipedOut;
+        // 队列容量根据实际需求调整，此处设为 1000
+        private static final int QUEUE_CAPACITY = 1000;
+        private static final BlockingQueue<byte[]> inputQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
 
-        static void init() throws IOException {
-            PipedInputStream pipedIn = new PipedInputStream();
-            pipedOut = new PipedOutputStream(pipedIn);
-            System.setIn(pipedIn);
-            WebConsole.inputReader = new BufferedReader(new InputStreamReader(pipedIn, StandardCharsets.UTF_8));
+        /**
+         * 初始化输入重定向，将 System.in 替换为自定义的 QueueInputStream
+         */
+        static void init() {
+            System.setIn(new QueueInputStream(inputQueue));
+            // 供 WebConsole.readLine 使用的 BufferedReader
+            WebConsole.inputReader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         }
 
+        /**
+         * 发送用户输入（由 HTTP 请求调用）
+         * @param line 用户输入的一行字符串（不含换行符）
+         * @throws IOException 当队列满时抛出，HTTP 层可据此返回 500 错误
+         */
         static void sendInput(String line) throws IOException {
-            pipedOut.write((line + "\n").getBytes(StandardCharsets.UTF_8));
-            pipedOut.flush();
+            byte[] data = (line + "\n").getBytes(StandardCharsets.UTF_8);
+            boolean offered = inputQueue.offer(data);
+            if (!offered) {
+                throw new IOException("Input queue is full, please try again later.");
+            }
+        }
+
+        /**
+         * 自定义 InputStream，从 BlockingQueue 中读取字节数组
+         */
+        static class QueueInputStream extends InputStream {
+            private final BlockingQueue<byte[]> queue;
+            private byte[] currentBuffer;
+            private int pos;
+
+            QueueInputStream(BlockingQueue<byte[]> queue) {
+                this.queue = queue;
+            }
+
+            @Override
+            public int read() throws IOException {
+                if (currentBuffer == null || pos >= currentBuffer.length) {
+                    try {
+                        currentBuffer = queue.take();  // 阻塞等待输入
+                        pos = 0;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException(e);
+                    }
+                }
+                return currentBuffer[pos++] & 0xFF;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                if (len == 0) return 0;
+                int c = read();
+                if (c == -1) return -1;
+                b[off] = (byte) c;
+                return 1;
+            }
         }
     }
 
@@ -462,271 +536,290 @@ public class WebConsole {
 
         private String getHtmlPage() {
             return "<!DOCTYPE html>\n" +
-                    "                <html lang=\"zh-CN\">\n" +
-                    "                <head>\n" +
-                    "                    <meta charset=\"UTF-8\">\n" +
-                    "                    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
-                    "                    <title>网页控制台</title>\n" +
-                    "                    <style>\n" +
-                    "                        body {\n" +
-                    "                            background-color: #0d1117;\n" +
-                    "                            color: #c9d1d9;\n" +
-                    "                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;\n" +
-                    "                            margin: 0;\n" +
-                    "                            padding: 20px;\n" +
-                    "                        }\n" +
-                    "                        .container {\n" +
-                    "                            max-width: 1400px;\n" +
-                    "                            margin: 0 auto;\n" +
-                    "                        }\n" +
-                    "                        .header {\n" +
-                    "                            border-bottom: 1px solid #30363d;\n" +
-                    "                            padding-bottom: 10px;\n" +
-                    "                            margin-bottom: 20px;\n" +
-                    "                        }\n" +
-                    "                        .header h1 {\n" +
-                    "                            font-size: 24px;\n" +
-                    "                            font-weight: 600;\n" +
-                    "                            margin: 0;\n" +
-                    "                        }\n" +
-                    "                        /* 监控卡片区域 */\n" +
-                    "                        .stats-grid {\n" +
-                    "                            display: grid;\n" +
-                    "                            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));\n" +
-                    "                            gap: 16px;\n" +
-                    "                            margin-bottom: 24px;\n" +
-                    "                        }\n" +
-                    "                        .stat-card {\n" +
-                    "                            background-color: #161b22;\n" +
-                    "                            border: 1px solid #30363d;\n" +
-                    "                            border-radius: 6px;\n" +
-                    "                            padding: 12px 16px;\n" +
-                    "                        }\n" +
-                    "                        .stat-title {\n" +
-                    "                            font-size: 12px;\n" +
-                    "                            font-weight: 500;\n" +
-                    "                            color: #8b949e;\n" +
-                    "                            margin-bottom: 8px;\n" +
-                    "                            text-transform: uppercase;\n" +
-                    "                            letter-spacing: 0.5px;\n" +
-                    "                        }\n" +
-                    "                        .stat-value {\n" +
-                    "                            font-size: 24px;\n" +
-                    "                            font-weight: 600;\n" +
-                    "                            margin-bottom: 8px;\n" +
-                    "                        }\n" +
-                    "                        .stat-sub {\n" +
-                    "                            font-size: 12px;\n" +
-                    "                            color: #8b949e;\n" +
-                    "                        }\n" +
-                    "                        .progress-bar {\n" +
-                    "                            background-color: #30363d;\n" +
-                    "                            border-radius: 10px;\n" +
-                    "                            height: 6px;\n" +
-                    "                            overflow: hidden;\n" +
-                    "                            margin-top: 8px;\n" +
-                    "                        }\n" +
-                    "                        .progress-fill {\n" +
-                    "                            background-color: #238636;\n" +
-                    "                            height: 100%;\n" +
-                    "                            width: 0%;\n" +
-                    "                            border-radius: 10px;\n" +
-                    "                        }\n" +
-                    "                        /* 控制台区域 */\n" +
-                    "                        .console {\n" +
-                    "                            background-color: #161b22;\n" +
-                    "                            border: 1px solid #30363d;\n" +
-                    "                            border-radius: 6px;\n" +
-                    "                            padding: 16px;\n" +
-                    "                            font-family: 'SFMono', 'Monaco', 'Cascadia Code', monospace;\n" +
-                    "                            font-size: 12px;\n" +
-                    "                            line-height: 1.5;\n" +
-                    "                            overflow-y: auto;\n" +
-                    "                            height: 400px;\n" +
-                    "                            margin-bottom: 20px;\n" +
-                    "                        }\n" +
-                    "                        .console-line {\n" +
-                    "                            white-space: pre-wrap;\n" +
-                    "                            word-break: break-all;\n" +
-                    "                            border-bottom: 1px solid #21262d;\n" +
-                    "                            padding: 2px 0;\n" +
-                    "                        }\n" +
-                    "                        .input-area {\n" +
-                    "                            display: flex;\n" +
-                    "                            gap: 10px;\n" +
-                    "                            align-items: center;\n" +
-                    "                        }\n" +
-                    "                        .input-area input {\n" +
-                    "                            flex: 1;\n" +
-                    "                            background-color: #0d1117;\n" +
-                    "                            border: 1px solid #30363d;\n" +
-                    "                            border-radius: 6px;\n" +
-                    "                            color: #c9d1d9;\n" +
-                    "                            padding: 8px 12px;\n" +
-                    "                            font-family: inherit;\n" +
-                    "                            font-size: 14px;\n" +
-                    "                        }\n" +
-                    "                        .input-area button {\n" +
-                    "                            background-color: #238636;\n" +
-                    "                            border: none;\n" +
-                    "                            border-radius: 6px;\n" +
-                    "                            color: white;\n" +
-                    "                            padding: 8px 16px;\n" +
-                    "                            font-size: 14px;\n" +
-                    "                            font-weight: 500;\n" +
-                    "                            cursor: pointer;\n" +
-                    "                            transition: background-color 0.2s;\n" +
-                    "                        }\n" +
-                    "                        .input-area button:hover {\n" +
-                    "                            background-color: #2ea043;\n" +
-                    "                        }\n" +
-                    "                        .status {\n" +
-                    "                            margin-top: 10px;\n" +
-                    "                            font-size: 12px;\n" +
-                    "                            color: #8b949e;\n" +
-                    "                        }\n" +
-                    "                    </style>\n" +
-                    "                </head>\n" +
-                    "                <body>\n" +
-                    "                    <div class=\"container\">\n" +
-                    "                        <div class=\"header\">\n" +
-                    "                            <h1>实时控制台输出 + 系统监控</h1>\n" +
-                    "                        </div>\n" +
+                    "<html lang=\"zh-CN\">\n" +
+                    "<head>\n" +
+                    "    <meta charset=\"UTF-8\">\n" +
+                    "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n" +
+                    "    <title>网页控制台</title>\n" +
+                    "    <style>\n" +
+                    "        body {\n" +
+                    "            background-color: #0d1117;\n" +
+                    "            color: #c9d1d9;\n" +
+                    "            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;\n" +
+                    "            margin: 0;\n" +
+                    "            padding: 20px;\n" +
+                    "        }\n" +
+                    "        .container {\n" +
+                    "            max-width: 1400px;\n" +
+                    "            margin: 0 auto;\n" +
+                    "        }\n" +
+                    "        .header {\n" +
+                    "            border-bottom: 1px solid #30363d;\n" +
+                    "            padding-bottom: 10px;\n" +
+                    "            margin-bottom: 20px;\n" +
+                    "        }\n" +
+                    "        .header h1 {\n" +
+                    "            font-size: 24px;\n" +
+                    "            font-weight: 600;\n" +
+                    "            margin: 0;\n" +
+                    "        }\n" +
+                    "        /* 监控卡片区域 */\n" +
+                    "        .stats-grid {\n" +
+                    "            display: grid;\n" +
+                    "            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));\n" +
+                    "            gap: 16px;\n" +
+                    "            margin-bottom: 24px;\n" +
+                    "        }\n" +
+                    "        .stat-card {\n" +
+                    "            background-color: #161b22;\n" +
+                    "            border: 1px solid #30363d;\n" +
+                    "            border-radius: 6px;\n" +
+                    "            padding: 12px 16px;\n" +
+                    "        }\n" +
+                    "        .stat-title {\n" +
+                    "            font-size: 12px;\n" +
+                    "            font-weight: 500;\n" +
+                    "            color: #8b949e;\n" +
+                    "            margin-bottom: 8px;\n" +
+                    "            text-transform: uppercase;\n" +
+                    "            letter-spacing: 0.5px;\n" +
+                    "        }\n" +
+                    "        .stat-value {\n" +
+                    "            font-size: 24px;\n" +
+                    "            font-weight: 600;\n" +
+                    "            margin-bottom: 8px;\n" +
+                    "        }\n" +
+                    "        .stat-sub {\n" +
+                    "            font-size: 12px;\n" +
+                    "            color: #8b949e;\n" +
+                    "        }\n" +
+                    "        .progress-bar {\n" +
+                    "            background-color: #30363d;\n" +
+                    "            border-radius: 10px;\n" +
+                    "            height: 6px;\n" +
+                    "            overflow: hidden;\n" +
+                    "            margin-top: 8px;\n" +
+                    "        }\n" +
+                    "        .progress-fill {\n" +
+                    "            background-color: #238636;\n" +
+                    "            height: 100%;\n" +
+                    "            width: 0%;\n" +
+                    "            border-radius: 10px;\n" +
+                    "        }\n" +
+                    "        /* 控制台区域 */\n" +
+                    "        .console {\n" +
+                    "            background-color: #161b22;\n" +
+                    "            border: 1px solid #30363d;\n" +
+                    "            border-radius: 6px;\n" +
+                    "            padding: 16px;\n" +
+                    "            font-family: 'SFMono', 'Monaco', 'Cascadia Code', monospace;\n" +
+                    "            font-size: 12px;\n" +
+                    "            line-height: 1.5;\n" +
+                    "            overflow-y: auto;\n" +
+                    "            height: 400px;\n" +
+                    "            margin-bottom: 20px;\n" +
+                    "        }\n" +
+                    "        .console-line {\n" +
+                    "            white-space: pre-wrap;\n" +
+                    "            word-break: break-all;\n" +
+                    "            border-bottom: 1px solid #21262d;\n" +
+                    "            padding: 2px 0;\n" +
+                    "        }\n" +
+                    "        .input-area {\n" +
+                    "            display: flex;\n" +
+                    "            gap: 10px;\n" +
+                    "            align-items: center;\n" +
+                    "        }\n" +
+                    "        .input-area input {\n" +
+                    "            flex: 1;\n" +
+                    "            background-color: #0d1117;\n" +
+                    "            border: 1px solid #30363d;\n" +
+                    "            border-radius: 6px;\n" +
+                    "            color: #c9d1d9;\n" +
+                    "            padding: 8px 12px;\n" +
+                    "            font-family: inherit;\n" +
+                    "            font-size: 14px;\n" +
+                    "        }\n" +
+                    "        .input-area button {\n" +
+                    "            background-color: #238636;\n" +
+                    "            border: none;\n" +
+                    "            border-radius: 6px;\n" +
+                    "            color: white;\n" +
+                    "            padding: 8px 16px;\n" +
+                    "            font-size: 14px;\n" +
+                    "            font-weight: 500;\n" +
+                    "            cursor: pointer;\n" +
+                    "            transition: background-color 0.2s;\n" +
+                    "        }\n" +
+                    "        .input-area button:hover {\n" +
+                    "            background-color: #2ea043;\n" +
+                    "        }\n" +
+                    "        .kill-btn {\n" +
+                    "            background-color: #da3633 !important;\n" +
+                    "        }\n" +
+                    "        .kill-btn:hover {\n" +
+                    "            background-color: #f85149 !important;\n" +
+                    "        }\n" +
+                    "        .status {\n" +
+                    "            margin-top: 10px;\n" +
+                    "            font-size: 12px;\n" +
+                    "            color: #8b949e;\n" +
+                    "        }\n" +
+                    "    </style>\n" +
+                    "</head>\n" +
+                    "<body>\n" +
+                    "<div class=\"container\">\n" +
+                    "    <div class=\"header\">\n" +
+                    "        <h1>实时控制台输出 + 系统监控</h1>\n" +
+                    "    </div>\n" +
                     "\n" +
-                    "                        <!-- 监控卡片区域 -->\n" +
-                    "                        <div class=\"stats-grid\" id=\"statsGrid\">\n" +
-                    "                            <div class=\"stat-card\">\n" +
-                    "                                <div class=\"stat-title\">CPU 占用</div>\n" +
-                    "                                <div class=\"stat-value\" id=\"cpuValue\">--%</div>\n" +
-                    "                                <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"cpuFill\"></div></div>\n" +
-                    "                            </div>\n" +
-                    "                            <div class=\"stat-card\">\n" +
-                    "                                <div class=\"stat-title\">内存占用</div>\n" +
-                    "                                <div class=\"stat-value\" id=\"memValue\">-- / --</div>\n" +
-                    "                                <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"memFill\"></div></div>\n" +
-                    "                                <div class=\"stat-sub\" id=\"memPercent\">--%</div>\n" +
-                    "                            </div>\n" +
-                    "                            <div class=\"stat-card\">\n" +
-                    "                                <div class=\"stat-title\">磁盘占用</div>\n" +
-                    "                                <div class=\"stat-value\" id=\"diskValue\">-- / --</div>\n" +
-                    "                                <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"diskFill\"></div></div>\n" +
-                    "                                <div class=\"stat-sub\" id=\"diskPercent\">--%</div>\n" +
-                    "                            </div>\n" +
-                    "                            <div class=\"stat-card\">\n" +
-                    "                                <div class=\"stat-title\">网络速率</div>\n" +
-                    "                                <div class=\"stat-value\" id=\"netRx\">↓ -- KB/s</div>\n" +
-                    "                                <div class=\"stat-value\" id=\"netTx\" style=\"margin-top: 4px;\">↑ -- KB/s</div>\n" +
-                    "                            </div>\n" +
-                    "                        </div>\n" +
+                    "    <!-- 监控卡片区域 -->\n" +
+                    "    <div class=\"stats-grid\" id=\"statsGrid\">\n" +
+                    "        <div class=\"stat-card\">\n" +
+                    "            <div class=\"stat-title\">CPU 占用</div>\n" +
+                    "            <div class=\"stat-value\" id=\"cpuValue\">--%</div>\n" +
+                    "            <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"cpuFill\"></div></div>\n" +
+                    "        </div>\n" +
+                    "        <div class=\"stat-card\">\n" +
+                    "            <div class=\"stat-title\">内存占用</div>\n" +
+                    "            <div class=\"stat-value\" id=\"memValue\">-- / --</div>\n" +
+                    "            <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"memFill\"></div></div>\n" +
+                    "            <div class=\"stat-sub\" id=\"memPercent\">--%</div>\n" +
+                    "        </div>\n" +
+                    "        <div class=\"stat-card\">\n" +
+                    "            <div class=\"stat-title\">磁盘占用</div>\n" +
+                    "            <div class=\"stat-value\" id=\"diskValue\">-- / --</div>\n" +
+                    "            <div class=\"progress-bar\"><div class=\"progress-fill\" id=\"diskFill\"></div></div>\n" +
+                    "            <div class=\"stat-sub\" id=\"diskPercent\">--%</div>\n" +
+                    "        </div>\n" +
+                    "        <div class=\"stat-card\">\n" +
+                    "            <div class=\"stat-title\">网络速率</div>\n" +
+                    "            <div class=\"stat-value\" id=\"netRx\">↓ -- KB/s</div>\n" +
+                    "            <div class=\"stat-value\" id=\"netTx\" style=\"margin-top: 4px;\">↑ -- KB/s</div>\n" +
+                    "        </div>\n" +
+                    "    </div>\n" +
                     "\n" +
-                    "                        <!-- 控制台区域 -->\n" +
-                    "                        <div class=\"console\" id=\"console\">\n" +
-                    "                            <div class=\"console-line\">等待日志输出...</div>\n" +
-                    "                        </div>\n" +
-                    "                        <div class=\"input-area\">\n" +
-                    "                            <input type=\"text\" id=\"inputField\" placeholder=\"输入命令并回车或点击发送...\" autocomplete=\"off\">\n" +
-                    "                            <button id=\"sendBtn\">发送</button>\n" +
-                    "                        </div>\n" +
-                    "                        <div class=\"status\" id=\"status\">已连接</div>\n" +
-                    "                    </div>\n" +
+                    "    <!-- 控制台区域 -->\n" +
+                    "    <div class=\"console\" id=\"console\">\n" +
+                    "        <div class=\"console-line\">等待日志输出...</div>\n" +
+                    "    </div>\n" +
+                    "    <div class=\"input-area\">\n" +
+                    "        <input type=\"text\" id=\"inputField\" placeholder=\"输入命令并回车或点击发送...\" autocomplete=\"off\">\n" +
+                    "        <button id=\"sendBtn\">发送</button>\n" +
+                    "        <button id=\"killBtn\" class=\"kill-btn\">终止进程</button>\n" +
+                    "    </div>\n" +
+                    "    <div class=\"status\" id=\"status\">已连接</div>\n" +
+                    "</div>\n" +
                     "\n" +
-                    "                    <script>\n" +
-                    "                        // 日志轮询\n" +
-                    "                        let lastIndex = -1;\n" +
-                    "                        const consoleDiv = document.getElementById('console');\n" +
-                    "                        const inputField = document.getElementById('inputField');\n" +
-                    "                        const sendBtn = document.getElementById('sendBtn');\n" +
-                    "                        const statusSpan = document.getElementById('status');\n" +
+                    "<script>\n" +
+                    "    // 日志轮询\n" +
+                    "    let lastIndex = -1;\n" +
+                    "    const consoleDiv = document.getElementById('console');\n" +
+                    "    const inputField = document.getElementById('inputField');\n" +
+                    "    const sendBtn = document.getElementById('sendBtn');\n" +
+                    "    const statusSpan = document.getElementById('status');\n" +
+                    "    const killBtn = document.getElementById('killBtn');\n" +
                     "\n" +
-                    "                        function fetchLogs() {\n" +
-                    "                            fetch('/logs?last=' + lastIndex)\n" +
-                    "                                .then(response => response.json())\n" +
-                    "                                .then(data => {\n" +
-                    "                                    if (data.logs && data.logs.length > 0) {\n" +
-                    "                                        data.logs.forEach(line => {\n" +
-                    "                                            const lineDiv = document.createElement('div');\n" +
-                    "                                            lineDiv.className = 'console-line';\n" +
-                    "                                            lineDiv.textContent = line;\n" +
-                    "                                            consoleDiv.appendChild(lineDiv);\n" +
-                    "                                        });\n" +
-                    "                                        consoleDiv.scrollTop = consoleDiv.scrollHeight;\n" +
-                    "                                        lastIndex = data.lastIndex;\n" +
-                    "                                    }\n" +
-                    "                                    statusSpan.textContent = '已连接';\n" +
-                    "                                })\n" +
-                    "                                .catch(err => {\n" +
-                    "                                    statusSpan.textContent = '连接错误: ' + err.message;\n" +
-                    "                                });\n" +
-                    "                        }\n" +
+                    "    function fetchLogs() {\n" +
+                    "        fetch('/logs?last=' + lastIndex)\n" +
+                    "            .then(response => response.json())\n" +
+                    "            .then(data => {\n" +
+                    "                if (data.logs && data.logs.length > 0) {\n" +
+                    "                    data.logs.forEach(line => {\n" +
+                    "                        const lineDiv = document.createElement('div');\n" +
+                    "                        lineDiv.className = 'console-line';\n" +
+                    "                        lineDiv.textContent = line;\n" +
+                    "                        consoleDiv.appendChild(lineDiv);\n" +
+                    "                    });\n" +
+                    "                    consoleDiv.scrollTop = consoleDiv.scrollHeight;\n" +
+                    "                    lastIndex = data.lastIndex;\n" +
+                    "                }\n" +
+                    "                statusSpan.textContent = '已连接';\n" +
+                    "            })\n" +
+                    "            .catch(err => {\n" +
+                    "                statusSpan.textContent = '连接错误: ' + err.message;\n" +
+                    "            });\n" +
+                    "    }\n" +
                     "\n" +
-                    "                        function sendInput() {\n" +
-                    "                            const input = inputField.value;\n" +
-                    "                            if (!input.trim()) return;\n" +
-                    "                            fetch('/input', {\n" +
-                    "                                method: 'POST',\n" +
-                    "                                body: input\n" +
-                    "                            })\n" +
-                    "                            .then(response => {\n" +
-                    "                                if (response.ok) {\n" +
-                    "                                    inputField.value = '';\n" +
-                    "                                    statusSpan.textContent = '输入已发送';\n" +
-                    "                                } else {\n" +
-                    "                                    statusSpan.textContent = '发送失败';\n" +
-                    "                                }\n" +
-                    "                            })\n" +
-                    "                            .catch(err => {\n" +
-                    "                                statusSpan.textContent = '发送错误: ' + err.message;\n" +
-                    "                            });\n" +
-                    "                        }\n" +
+                    "    function sendInput() {\n" +
+                    "        const input = inputField.value;\n" +
+                    "        if (!input.trim()) return;\n" +
+                    "        fetch('/input', {\n" +
+                    "            method: 'POST',\n" +
+                    "            body: input\n" +
+                    "        })\n" +
+                    "        .then(response => {\n" +
+                    "            if (response.ok) {\n" +
+                    "                inputField.value = '';\n" +
+                    "                statusSpan.textContent = '输入已发送';\n" +
+                    "            } else {\n" +
+                    "                statusSpan.textContent = '发送失败';\n" +
+                    "            }\n" +
+                    "        })\n" +
+                    "        .catch(err => {\n" +
+                    "            statusSpan.textContent = '发送错误: ' + err.message;\n" +
+                    "        });\n" +
+                    "    }\n" +
                     "\n" +
-                    "                        // 监控数据轮询\n" +
-                    "                        function fetchStats() {\n" +
-                    "                            fetch('/stats')\n" +
-                    "                                .then(response => response.json())\n" +
-                    "                                .then(data => {\n" +
-                    "                                    // CPU\n" +
-                    "                                    const cpu = data.cpuUsage;\n" +
-                    "                                    const cpuVal = cpu >= 0 ? cpu.toFixed(1) + '%' : 'N/A';\n" +
-                    "                                    document.getElementById('cpuValue').innerText = cpuVal;\n" +
-                    "                                    document.getElementById('cpuFill').style.width = (cpu >=0 ? cpu : 0) + '%';\n" +
+                    "    // 监控数据轮询\n" +
+                    "    function fetchStats() {\n" +
+                    "        fetch('/stats')\n" +
+                    "            .then(response => response.json())\n" +
+                    "            .then(data => {\n" +
+                    "                // CPU\n" +
+                    "                const cpu = data.cpuUsage;\n" +
+                    "                const cpuVal = cpu >= 0 ? cpu.toFixed(1) + '%' : 'N/A';\n" +
+                    "                document.getElementById('cpuValue').innerText = cpuVal;\n" +
+                    "                document.getElementById('cpuFill').style.width = (cpu >=0 ? cpu : 0) + '%';\n" +
                     "\n" +
-                    "                                    // 内存\n" +
-                    "                                    const memTotal = (data.totalMem / (1024**3)).toFixed(1);\n" +
-                    "                                    const memUsed = (data.usedMem / (1024**3)).toFixed(1);\n" +
-                    "                                    document.getElementById('memValue').innerText = memUsed + ' GB / ' + memTotal + ' GB';\n" +
-                    "                                    const memPercent = data.memUsagePercent.toFixed(1);\n" +
-                    "                                    document.getElementById('memPercent').innerText = memPercent + '%';\n" +
-                    "                                    document.getElementById('memFill').style.width = memPercent + '%';\n" +
+                    "                // 内存\n" +
+                    "                const memTotal = (data.totalMem / (1024**3)).toFixed(1);\n" +
+                    "                const memUsed = (data.usedMem / (1024**3)).toFixed(1);\n" +
+                    "                document.getElementById('memValue').innerText = memUsed + ' GB / ' + memTotal + ' GB';\n" +
+                    "                const memPercent = data.memUsagePercent.toFixed(1);\n" +
+                    "                document.getElementById('memPercent').innerText = memPercent + '%';\n" +
+                    "                document.getElementById('memFill').style.width = memPercent + '%';\n" +
                     "\n" +
-                    "                                    // 磁盘\n" +
-                    "                                    const diskTotal = (data.totalDisk / (1024**3)).toFixed(1);\n" +
-                    "                                    const diskUsed = (data.usedDisk / (1024**3)).toFixed(1);\n" +
-                    "                                    document.getElementById('diskValue').innerText = diskUsed + ' GB / ' + diskTotal + ' GB';\n" +
-                    "                                    const diskPercent = data.diskUsagePercent.toFixed(1);\n" +
-                    "                                    document.getElementById('diskPercent').innerText = diskPercent + '%';\n" +
-                    "                                    document.getElementById('diskFill').style.width = diskPercent + '%';\n" +
+                    "                // 磁盘\n" +
+                    "                const diskTotal = (data.totalDisk / (1024**3)).toFixed(1);\n" +
+                    "                const diskUsed = (data.usedDisk / (1024**3)).toFixed(1);\n" +
+                    "                document.getElementById('diskValue').innerText = diskUsed + ' GB / ' + diskTotal + ' GB';\n" +
+                    "                const diskPercent = data.diskUsagePercent.toFixed(1);\n" +
+                    "                document.getElementById('diskPercent').innerText = diskPercent + '%';\n" +
+                    "                document.getElementById('diskFill').style.width = diskPercent + '%';\n" +
                     "\n" +
-                    "                                    // 网络\n" +
-                    "                                    const rxKbps = data.rxRate / 1024;\n" +
-                    "                                    const txKbps = data.txRate / 1024;\n" +
-                    "                                    document.getElementById('netRx').innerHTML = '↓ ' + rxKbps.toFixed(1) + ' KB/s';\n" +
-                    "                                    document.getElementById('netTx').innerHTML = '↑ ' + txKbps.toFixed(1) + ' KB/s';\n" +
-                    "                                })\n" +
-                    "                                .catch(err => console.error('Stats fetch error:', err));\n" +
-                    "                        }\n" +
+                    "                // 网络\n" +
+                    "                const rxKbps = data.rxRate / 1024;\n" +
+                    "                const txKbps = data.txRate / 1024;\n" +
+                    "                document.getElementById('netRx').innerHTML = '↓ ' + rxKbps.toFixed(1) + ' KB/s';\n" +
+                    "                document.getElementById('netTx').innerHTML = '↑ ' + txKbps.toFixed(1) + ' KB/s';\n" +
+                    "            })\n" +
+                    "            .catch(err => console.error('Stats fetch error:', err));\n" +
+                    "    }\n" +
                     "\n" +
-                    "                        inputField.addEventListener('keypress', (e) => {\n" +
-                    "                            if (e.key === 'Enter') sendInput();\n" +
-                    "                        });\n" +
-                    "                        sendBtn.addEventListener('click', sendInput);\n" +
+                    "    // 终止进程\n" +
+                    "    killBtn.addEventListener('click', () => {\n" +
+                    "        if (confirm('确定要终止整个进程吗？此操作不可逆。')) {\n" +
+                    "            fetch('/stop', { method: 'POST' }).then(() => {\n" +
+                    "                statusSpan.textContent = '进程终止中...';\n" +
+                    "            }).catch(() => {\n" +
+                    "                statusSpan.textContent = '进程已终止';\n" +
+                    "            });\n" +
+                    "        }\n" +
+                    "    });\n" +
                     "\n" +
-                    "                        setInterval(fetchLogs, 500);\n" +
-                    "                        fetchLogs();\n" +
-                    "                        setInterval(fetchStats, 2000);  // 2秒刷新一次监控数据\n" +
-                    "                        fetchStats();\n" +
-                    "                    </script>\n" +
-                    "                </body>\n" +
-                    "                </html>";
+                    "    inputField.addEventListener('keypress', (e) => {\n" +
+                    "        if (e.key === 'Enter') sendInput();\n" +
+                    "    });\n" +
+                    "    sendBtn.addEventListener('click', sendInput);\n" +
+                    "\n" +
+                    "    setInterval(fetchLogs, 500);\n" +
+                    "    fetchLogs();\n" +
+                    "    setInterval(fetchStats, 2000);\n" +
+                    "    fetchStats();\n" +
+                    "</script>\n" +
+                    "</body>\n" +
+                    "</html>";
         }
     }
 
@@ -819,4 +912,29 @@ public class WebConsole {
         }
     }
 
+    // ========== 新增 /stop 处理器 ==========
+    static class StopHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(405, -1);
+                return;
+            }
+
+            String response = "Process is shutting down...";
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=UTF-8");
+            exchange.sendResponseHeaders(200, response.getBytes(StandardCharsets.UTF_8).length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes(StandardCharsets.UTF_8));
+            }
+
+            // 延迟退出，确保响应已发送
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException ignored) {}
+                System.exit(0);
+            }).start();
+        }
+    }
 }

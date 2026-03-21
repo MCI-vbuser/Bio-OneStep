@@ -8,6 +8,7 @@ public class SRA2FastQ {
 
     public static void handle(File rootDir) {
         // 递归遍历所有文件和目录
+        System.out.println("正在处理: "+rootDir.getAbsolutePath());
         processSraFiles(rootDir);
     }
 

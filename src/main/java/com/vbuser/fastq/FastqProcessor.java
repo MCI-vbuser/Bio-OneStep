@@ -93,8 +93,8 @@ public class FastqProcessor {
         }
 
         System.out.println("处理单端样本: " + sampleName);
-        // bwa mem 比对，输出sam
-        runCommandWithConda("bwa", "mem", "-t", "4", HG38_FILE, fastq.getAbsolutePath(), ">", samFile);
+        // bwa mem 比对，通过 -o 直接输出 sam
+        runCommandWithConda("bwa", "mem", "-t", "4", "-o", samFile, HG38_FILE, fastq.getAbsolutePath());
         // sam转bam
         runCommandWithConda("samtools", "view", "-bS", samFile, "-o", unsortedBam);
         // 排序bam
@@ -102,6 +102,7 @@ public class FastqProcessor {
         // 清理中间文件
         ignored = new File(samFile).delete();
         ignored = new File(unsortedBam).delete();
+        ignored = fastq.delete();
         System.out.println("完成: " + finalBam.getAbsolutePath());
     }
 
@@ -120,12 +121,14 @@ public class FastqProcessor {
         }
 
         System.out.println("处理双端样本: " + sampleName);
-        runCommandWithConda("bwa", "mem", "-t", "4", HG38_FILE,
-                fastq1.getAbsolutePath(), fastq2.getAbsolutePath(), ">", samFile);
+        runCommandWithConda("bwa", "mem", "-t", "4", "-o", samFile, HG38_FILE,
+                fastq1.getAbsolutePath(), fastq2.getAbsolutePath());
         runCommandWithConda("samtools", "view", "-bS", samFile, "-o", unsortedBam);
         runCommandWithConda("samtools", "sort", unsortedBam, "-o", finalBam.getAbsolutePath());
         ignored = new File(samFile).delete();
         ignored = new File(unsortedBam).delete();
+        ignored = fastq1.delete();
+        ignored = fastq2.delete();
         System.out.println("完成: " + finalBam.getAbsolutePath());
     }
 

@@ -19,6 +19,13 @@ public class Main {
         cls();
         System.out.println("环境检查通过");
         prepareSRA();
+        WebConsole.stopServer();
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        WebConsole.killProcess();
     }
 
     private static void cls(){
@@ -30,7 +37,7 @@ public class Main {
     }
 
     private static void prepareSRA(){
-        System.out.println("[1]使用本地SRA文件\n[2]下载新的SRA文件\n[3]跳过");
+        System.out.println("[1]使用本地SRA文件\n[2]下载新的SRA文件\n[3]已有bam,跳过");
         String ans = WebConsole.readLine();
         if(ans.equals("1")){
             System.out.println("请指定SRA文件路径");
@@ -51,9 +58,10 @@ public class Main {
         } else if (choice == 1) {
             SRA2FastQ.handle(new File(WebConsole.readLine()));
         } else return;
+        System.out.println("fastq文件已就位，开始组装bam文件");
         prepareBam();
         cls();
-        System.out.println("fastq文件已就位，开始组装bam文件");
+        System.out.println("组装bam完成");
     }
 
     private static void prepareBam(){
