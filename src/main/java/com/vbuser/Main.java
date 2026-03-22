@@ -2,6 +2,7 @@ package com.vbuser;
 
 import com.vbuser.fastq.FastqProcessor;
 import com.vbuser.fastq.SRA2FastQ;
+import com.vbuser.gtf.SingleGTF;
 import com.vbuser.pre.CommonEnv;
 import com.vbuser.pre.DownloadSRA;
 
@@ -9,6 +10,9 @@ import java.io.File;
 import java.io.IOException;
 
 public class Main {
+
+    private static boolean bam_sorted_ensured = true;
+
     public static void main(String[] args){
         try {
             WebConsole.start();
@@ -19,6 +23,8 @@ public class Main {
         cls();
         System.out.println("环境检查通过");
         prepareSRA();
+        prepareGTF();
+        System.out.println("正在停止HTTP服务器");
         WebConsole.stopServer();
         try {
             Thread.sleep(1000);
@@ -46,6 +52,7 @@ public class Main {
             String srr = WebConsole.readLine();
             DownloadSRA.download(srr);
         } else{
+            bam_sorted_ensured = false;
             cls();
             return;
         }
@@ -70,6 +77,20 @@ public class Main {
         } catch (IOException | InterruptedException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void prepareGTF(){
+        System.out.println("正在单独地为每个bam组装gtf文件");
+        if (!bam_sorted_ensured) System.out.println("请输入bam文件路径(通过-y指定确认sorted)");
+        String path = WebConsole.readLine();
+        if(path.split(" -").length > 1){
+            if(path.split(" -")[1].equals("y")){
+                bam_sorted_ensured = true;
+            }
+            path = path.split(" -")[0];
+        }
+        File bam_files = new File(bam_sorted_ensured?"./bam": path );
+        SingleGTF.handle(bam_files,bam_sorted_ensured);
     }
 
 }
