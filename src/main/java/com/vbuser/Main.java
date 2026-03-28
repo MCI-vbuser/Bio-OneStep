@@ -32,6 +32,16 @@ public class Main {
 
         prepareDataAndRunGTF();
 
+        // ========== 新增：运行 AS 分析流程 ==========
+        System.out.println("开始 AS 事件分析...");
+        try {
+            runAsPipeline();
+        } catch (IOException | InterruptedException e) {
+            System.err.println("AS 分析失败: " + e.getMessage());
+            // 可根据需要决定是否继续
+        }
+        // ========================================
+
         System.out.println("战至最后一刻!自刎归天!");
         try {
             Thread.sleep(1000);
@@ -49,14 +59,12 @@ public class Main {
         File genomeFile = new File("hg38.fa");
         if (!genomeFile.exists()) {
             System.out.println("下载 hg38 参考基因组...");
-            // 使用系统命令 wget 和 gunzip
             runSystemCommand("wget", "-O", "hg38.fa.gz", "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz");
             runSystemCommand("gunzip", "hg38.fa.gz");
         } else {
             System.out.println("参考基因组已存在: hg38.fa");
         }
 
-        // 检查 minimap2 索引
         File mmiIndex = new File("hg38.fa.mmi");
         if (!mmiIndex.exists()) {
             System.out.println("构建 minimap2 索引...");
@@ -105,6 +113,55 @@ public class Main {
 
         // 调用 SingleGTF 处理
         SingleGTF.handle(input, sortedEnsured);
+    }
+
+    private static void runAsPipeline() throws IOException, InterruptedException {
+        String baseDir = new File(".").getAbsolutePath();
+        String outputDir = new File("./as").getAbsolutePath();
+        String scriptPath = "scripts/as/run_as_pipeline.py";
+
+        File scriptFile = new File(scriptPath);
+        if (!scriptFile.exists()) {
+            throw new IOException("Python 脚本不存在: " + scriptFile.getAbsolutePath());
+        }
+
+        List<String> cmd = new ArrayList<>();
+        cmd.add("conda");
+        cmd.add("run");
+        cmd.add("-n");
+        cmd.add(CONDA_ENV);
+        cmd.add("python");
+        cmd.add(scriptPath);
+        cmd.add("--base_dir");
+        cmd.add(baseDir);
+        cmd.add("--output_dir");
+        cmd.add(outputDir);
+
+        System.out.println("执行命令: " + String.join(" ", cmd));
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.environment().put("PYTHONUNBUFFERED", "1");  // 强制 Python 无缓冲输出
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+
+        Thread outputReader = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    System.out.println(line);
+                }
+            } catch (IOException e) {
+                System.err.println("读取子进程输出时出错: " + e.getMessage());
+            }
+        });
+        outputReader.setDaemon(true);
+        outputReader.start();
+
+        int exitCode = process.waitFor();
+        outputReader.join(1000);
+        if (exitCode != 0) {
+            throw new IOException("AS 分析脚本执行失败，退出码: " + exitCode);
+        }
+        System.out.println("AS 分析完成。");
     }
 
     private static void cls() {

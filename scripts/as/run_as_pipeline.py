@@ -15,33 +15,34 @@ from collections import defaultdict
 
 # ========== 配置 ==========
 CONDA_ENV = "common_env"
-MIN_SAMPLES = 3          # 至少出现在3个样本中
-MIN_TPM = 0.1            # 平均TPM > 0.1
-# SUPPA 支持的事件类型：SE, SS (A5/A3), MX, RI, FL (AF/AL)
+MIN_SAMPLES = 3
+MIN_TPM = 0.1
 EVENT_TYPES = ['SE', 'SS', 'MX', 'RI', 'FL']
 
-# ========== 函数定义 ==========
-
 def run_command(cmd, conda=True):
-    """运行命令，可选择是否在conda环境中运行"""
+    """运行命令，实时输出（对于 python 脚本强制 -u）"""
+    if conda and cmd[0] == "python":
+        # 如果命令是 python script.py ...，则插入 -u 确保无缓冲
+        cmd = ["python", "-u"] + cmd[1:]
     if conda:
         full_cmd = ["conda", "run", "-n", CONDA_ENV] + cmd
     else:
         full_cmd = cmd
     print(f"Running: {' '.join(full_cmd)}")
-    result = subprocess.run(full_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Error: {result.stderr}")
+    process = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, bufsize=1)
+    for line in process.stdout:
+        print(line, end='')
+    process.wait()
+    if process.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(full_cmd)}")
-    return result.stdout
 
 def build_tpm_matrix(base_dir, output_file):
-    """从gffcompare生成的tmap文件中构建参考转录本TPM矩阵（SUPPA兼容格式）"""
+    """从tmap文件中构建TPM矩阵，包含参考转录本和新转录本（class_code='u'）"""
     gffcompare_dir = os.path.join(base_dir, "gtf_merge", "gffcompare")
     if not os.path.isdir(gffcompare_dir):
         raise FileNotFoundError(f"gffcompare directory not found: {gffcompare_dir}")
 
-    # 收集所有tmap文件
     tmap_files = []
     for sample_dir in os.listdir(gffcompare_dir):
         sample_path = os.path.join(gffcompare_dir, sample_dir)
@@ -54,29 +55,37 @@ def build_tpm_matrix(base_dir, output_file):
         raise RuntimeError("No tmap files found in gffcompare directory")
 
     sample_data = defaultdict(lambda: defaultdict(float))
-    all_ref_transcripts = set()
+    all_transcripts = set()  # 包括参考转录本和新转录本
 
     for sample_name, tmap_file in tmap_files:
         print(f"Reading {tmap_file}...")
         try:
             df = pd.read_csv(tmap_file, sep='\t')
-            # 筛选有效的参考转录本（ref_id != '-' 且 TPM > 0）
-            valid = df[(df['ref_id'] != '-') & (df['TPM'] > 0)]
-            for _, row in valid.iterrows():
+            # 处理参考转录本 (ref_id != '-')
+            ref_valid = df[(df['ref_id'] != '-') & (df['TPM'] > 0)]
+            for _, row in ref_valid.iterrows():
                 ref_id = row['ref_id']
                 tpm = row['TPM']
                 sample_data[sample_name][ref_id] += tpm
-                all_ref_transcripts.add(ref_id)
+                all_transcripts.add(ref_id)
+
+            # 处理新转录本 (class_code='u' 且 qry_id != '-')
+            novel_valid = df[(df['class_code'] == 'u') & (df['qry_id'] != '-') & (df['TPM'] > 0)]
+            for _, row in novel_valid.iterrows():
+                qry_id = row['qry_id']
+                tpm = row['TPM']
+                sample_data[sample_name][qry_id] += tpm
+                all_transcripts.add(qry_id)
         except Exception as e:
             print(f"Error reading {tmap_file}: {e}")
 
     # 构建DataFrame
-    matrix = pd.DataFrame(index=list(all_ref_transcripts))
+    matrix = pd.DataFrame(index=list(all_transcripts))
     for sample, trans_dict in sample_data.items():
         matrix[sample] = pd.Series(trans_dict)
     matrix = matrix.fillna(0)
 
-    # 保存为SUPPA兼容格式：第一行是样本名（无空列），第一列是转录本ID（无标题）
+    # 保存为SUPPA兼容格式
     with open(output_file, 'w') as f:
         f.write('\t'.join(matrix.columns) + '\n')
     matrix.to_csv(output_file, sep='\t', header=False, index=True, mode='a')
@@ -84,12 +93,11 @@ def build_tpm_matrix(base_dir, output_file):
     return matrix
 
 def filter_expressed_gtf(ref_gtf, tpm_matrix, expressed_gtf):
-    """从参考注释中筛选表达的转录本，生成expressed GTF"""
-    # 读取TPM矩阵，确定表达的转录本（在至少MIN_SAMPLES个样本中TPM > MIN_TPM）
+    """从参考注释中筛选表达的转录本（基于TPM矩阵中的转录本ID）"""
     tpm_df = pd.read_csv(tpm_matrix, sep='\t', index_col=0)
-    expressed_in_samples = (tpm_df > MIN_TPM).sum(axis=1)
-    expressed_transcripts = expressed_in_samples[expressed_in_samples >= MIN_SAMPLES].index.tolist()
-    print(f"Expressed transcripts: {len(expressed_transcripts)}")
+    # 矩阵中的行索引即为所有转录本ID（包括参考和新转录本），但这里我们只保留参考注释中存在的转录本
+    expressed_transcripts = set(tpm_df.index)
+    print(f"Total transcripts in TPM matrix: {len(expressed_transcripts)}")
 
     # 从参考GTF中提取这些转录本的行
     output_lines = []
@@ -102,7 +110,6 @@ def filter_expressed_gtf(ref_gtf, tpm_matrix, expressed_gtf):
             if len(parts) < 9:
                 output_lines.append(line)
                 continue
-            # 提取transcript_id
             attrs = parts[8]
             tid = None
             for attr in attrs.split(';'):
@@ -115,22 +122,21 @@ def filter_expressed_gtf(ref_gtf, tpm_matrix, expressed_gtf):
 
     with open(expressed_gtf, 'w') as f:
         f.writelines(output_lines)
-    print(f"Expressed GTF written to {expressed_gtf}")
+    print(f"Expressed GTF written to {expressed_gtf}, containing {len(expressed_transcripts)} transcripts")
 
 def extract_high_quality_novel(base_dir, output_file):
-    """从tmap文件中提取高质量新转录本（class_code='u'），输出详细TSV"""
+    """提取高质量新转录本（与之前相同，无需修改）"""
     gffcompare_dir = os.path.join(base_dir, "gtf_merge", "gffcompare")
     if not os.path.isdir(gffcompare_dir):
         raise FileNotFoundError(f"gffcompare directory not found: {gffcompare_dir}")
 
     transcript_counts = defaultdict(int)
-    transcript_info = defaultdict(dict)  # 存储每个样本中的信息
+    transcript_info = defaultdict(dict)
 
     for sample_dir in os.listdir(gffcompare_dir):
         sample_path = os.path.join(gffcompare_dir, sample_dir)
         if not os.path.isdir(sample_path):
             continue
-        # 查找tmap文件
         tmap_file = None
         for f in os.listdir(sample_path):
             if f.endswith('.tmap') and 'ballgown' in f:
@@ -155,7 +161,6 @@ def extract_high_quality_novel(base_dir, output_file):
         except Exception as e:
             print(f"Error reading {tmap_file}: {e}")
 
-    # 筛选高质量新转录本
     output_data = []
     for tid, count in transcript_counts.items():
         if count >= MIN_SAMPLES:
@@ -175,17 +180,14 @@ def extract_high_quality_novel(base_dir, output_file):
                     'samples': ','.join(samples_info.keys())
                 })
 
-    # 转换为DataFrame并保存
     df_output = pd.DataFrame(output_data)
     df_output = df_output.sort_values(['sample_count', 'avg_TPM'], ascending=[False, False])
     df_output.to_csv(output_file, sep='\t', index=False)
-    print(f"High-quality novel transcripts saved to {output_file}")
-    print(f"  Total: {len(df_output)} transcripts")
+    print(f"High-quality novel transcripts saved to {output_file}, total: {len(df_output)}")
     return df_output
 
 def create_enhanced_annotation(expressed_gtf, merged_gtf, novel_tsv, enhanced_gtf):
     """将高质量新转录本从merged.gtf追加到expressed.gtf，生成enhanced GTF"""
-    # 读取高质量转录本ID（从TSV的第一列）
     if not os.path.exists(novel_tsv):
         print(f"Warning: {novel_tsv} not found, no novel transcripts to add.")
         high_quality_ids = set()
@@ -194,7 +196,7 @@ def create_enhanced_annotation(expressed_gtf, merged_gtf, novel_tsv, enhanced_gt
         high_quality_ids = set(df_novel['transcript_id'].tolist())
     print(f"Adding {len(high_quality_ids)} transcripts to enhanced GTF")
 
-    # 复制expressed GTF到输出
+    # 复制expressed GTF
     with open(expressed_gtf, 'r') as f_in, open(enhanced_gtf, 'w') as f_out:
         f_out.writelines(f_in.readlines())
 
@@ -217,7 +219,6 @@ def create_enhanced_annotation(expressed_gtf, merged_gtf, novel_tsv, enhanced_gt
                     break
             if tid:
                 if tid != current_tid:
-                    # 上一个转录本结束，检查是否保存
                     if current_tid and current_tid in high_quality_ids:
                         with open(enhanced_gtf, 'a') as f_out:
                             f_out.writelines(buffer)
@@ -225,7 +226,6 @@ def create_enhanced_annotation(expressed_gtf, merged_gtf, novel_tsv, enhanced_gt
                     buffer = [line]
                 else:
                     buffer.append(line)
-        # 处理最后一个
         if current_tid and current_tid in high_quality_ids:
             with open(enhanced_gtf, 'a') as f_out:
                 f_out.writelines(buffer)
@@ -239,68 +239,55 @@ def generate_events(gtf_file, output_dir):
         out_prefix = os.path.join(output_dir, f"{event_type}")
         cmd = ["suppa.py", "generateEvents", "-i", gtf_file, "-o", out_prefix, "-e", event_type, "-f", "ioe"]
         run_command(cmd, conda=True)
-    print(f"Events generated in {output_dir}")
 
 def compute_psi(events_dir, tpm_matrix, output_dir):
     """使用SUPPA计算PSI值"""
     os.makedirs(output_dir, exist_ok=True)
-    # 获取所有事件文件（.ioe）
     ioe_files = [f for f in os.listdir(events_dir) if f.endswith('.ioe')]
     for ioe in ioe_files:
-        # 提取事件类型（去掉_strict.ioe后缀，但实际文件可能有_strict）
         event_base = ioe.replace('.ioe', '')
         event_file = os.path.join(events_dir, ioe)
         out_prefix = os.path.join(output_dir, event_base)
         cmd = ["suppa.py", "psiPerEvent", "-i", event_file, "-e", tpm_matrix, "-o", out_prefix]
         run_command(cmd, conda=True)
-    print(f"PSI values computed in {output_dir}")
 
-# ========== 主函数 ==========
 def main():
     parser = argparse.ArgumentParser(description="AS analysis pipeline")
-    parser.add_argument("--base_dir", required=True, help="Base working directory (where gtf_merge, etc. are located)")
-    parser.add_argument("--output_dir", required=True, help="Output directory for AS results (e.g., ./as)")
+    parser.add_argument("--base_dir", required=True)
+    parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()
 
-    # 确定路径
     base_dir = os.path.abspath(args.base_dir)
     output_dir = os.path.abspath(args.output_dir)
     merged_gtf = os.path.join(base_dir, "gtf_merge", "merged.gtf")
     ref_gtf = os.path.join(base_dir, "gencode.v45.annotation.gtf")
 
-    # 创建输出目录
     expressed_dir = os.path.join(output_dir, "expressed")
     enhanced_dir = os.path.join(output_dir, "enhanced")
     for d in [expressed_dir, enhanced_dir]:
         os.makedirs(d, exist_ok=True)
 
-    # 中间文件路径
     tpm_matrix = os.path.join(output_dir, "transcript_tpm_matrix.tsv")
     expressed_gtf = os.path.join(output_dir, "gencode.v45.expressed.gtf")
     enhanced_gtf = os.path.join(output_dir, "gencode.v45.enhanced.gtf")
     novel_tsv = os.path.join(output_dir, "high_quality_novel_transcripts.tsv")
 
-    # Step 1: 构建TPM矩阵（从tmap文件）
     print("="*50)
     print("Step 1: Building TPM matrix from tmap files")
     tpm_df = build_tpm_matrix(base_dir, tpm_matrix)
 
-    # Step 2: 创建expressed GTF
     print("="*50)
     print("Step 2: Creating expressed GTF")
     filter_expressed_gtf(ref_gtf, tpm_matrix, expressed_gtf)
 
-    # Step 3: 提取高质量新转录本（输出详细TSV）
     print("="*50)
     print("Step 3: Extracting high-quality novel transcripts")
     extract_high_quality_novel(base_dir, novel_tsv)
 
-    # Step 4: 创建enhanced GTF
     print("="*50)
     print("Step 4: Creating enhanced GTF")
     create_enhanced_annotation(expressed_gtf, merged_gtf, novel_tsv, enhanced_gtf)
 
-    # Step 5: 为两组注释生成事件文件
     print("="*50)
     print("Step 5: Generating events for expressed group")
     generate_events(expressed_gtf, os.path.join(expressed_dir, "events"))
@@ -309,7 +296,6 @@ def main():
     print("Step 5b: Generating events for enhanced group")
     generate_events(enhanced_gtf, os.path.join(enhanced_dir, "events"))
 
-    # Step 6: 计算PSI
     print("="*50)
     print("Step 6: Computing PSI for expressed group")
     compute_psi(os.path.join(expressed_dir, "events"), tpm_matrix, os.path.join(expressed_dir, "psi"))
@@ -320,6 +306,25 @@ def main():
 
     print("="*50)
     print("AS analysis completed successfully!")
+
+    print("="*50)
+    print("Step 7: Generating statistics and report")
+    import as_stats
+
+    stats_list = []
+    for i, dir_path in enumerate([expressed_dir, enhanced_dir]):
+        group_name = "expressed" if i == 0 else "enhanced"
+        try:
+            stats = as_stats.process_group(dir_path, group_name)
+            stats_list.append(stats)
+        except Exception as e:
+            print(f"Error processing {dir_path}: {e}")
+            sys.exit(1)
+
+    # 只为 expressed 组保存详细数据，传入 TPM 矩阵路径
+    as_stats.save_detailed_psi_to_db(stats_list[0], tpm_matrix, os.path.join(output_dir, "stats.db"))
+    as_stats.generate_html(stats_list, os.path.join(output_dir, "index.html"))
+    print("Statistics report generated.")
 
 if __name__ == "__main__":
     main()
