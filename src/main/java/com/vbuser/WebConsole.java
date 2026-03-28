@@ -706,7 +706,7 @@ public class WebConsole {
                     "    <div class=\"input-area\">\n" +
                     "        <input type=\"text\" id=\"inputField\" placeholder=\"输入命令并回车或点击发送...\" autocomplete=\"off\">\n" +
                     "        <button id=\"sendBtn\">发送</button>\n" +
-                    "        <button id=\"killBtn\" class=\"kill-btn\">终止进程</button>\n" +
+                    "        <button id=\"killBtn\" class=\"kill-btn\">自刎归天</button>\n" +
                     "    </div>\n" +
                     "    <div class=\"status\" id=\"status\">已连接</div>\n" +
                     "</div>\n" +
