@@ -335,84 +335,49 @@ def process_group(group_dir, group_name):
 
 # ------------------------------------------------------------
 # Save detailed event PSI data to SQLite
-def save_detailed_psi_to_db(expressed_stats, tpm_matrix_path, db_path="stats.db"):
+def save_detailed_psi_to_db(stats, tpm_matrix_path, db_path="stats.db"):
+    """
+    将 enhanced 组的详细 PSI 数据保存到 SQLite 数据库。
+    只创建 events 和 event_psi 两张表，不涉及 groups 和 samples。
+    events 表包含事件 ID、事件类型和所属组（enhanced）。
+    event_psi 表存储每个事件在每个样本中的 PSI 值。
+    """
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    c.execute("DROP TABLE IF EXISTS groups")
-    c.execute("DROP TABLE IF EXISTS samples")
+    # 删除旧表（如果有）
     c.execute("DROP TABLE IF EXISTS events")
     c.execute("DROP TABLE IF EXISTS event_psi")
 
-    c.execute('''CREATE TABLE groups (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE
-                )''')
-    c.execute('''CREATE TABLE samples (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE
-                )''')
+    # 创建 events 表
     c.execute('''CREATE TABLE events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
-                    chrom TEXT,
-                    start INTEGER,
-                    end INTEGER,
-                    strand TEXT,
-                    extra TEXT,
-                    group_id INTEGER,
-                    FOREIGN KEY(group_id) REFERENCES groups(id)
+                    group_name TEXT
                 )''')
+
+    # 创建 event_psi 表
     c.execute('''CREATE TABLE event_psi (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id INTEGER,
-                    sample_id INTEGER,
+                    sample_name TEXT,
                     psi_value REAL,
-                    FOREIGN KEY(event_id) REFERENCES events(id),
-                    FOREIGN KEY(sample_id) REFERENCES samples(id)
+                    FOREIGN KEY(event_id) REFERENCES events(id)
                 )''')
 
-    # Insert group
-    group_name = expressed_stats["group"]
-    c.execute("INSERT INTO groups (name) VALUES (?)", (group_name,))
-    c.execute("SELECT id FROM groups WHERE name = ?", (group_name,))
-    group_id = c.fetchone()[0]
-
-    # Read sample names from TPM matrix
-    sample_names = None
-    if os.path.exists(tpm_matrix_path):
+    # 读取样本名（从 TPM 矩阵的第一行）
+    if not os.path.exists(tpm_matrix_path):
+        print(f"Warning: TPM matrix not found at {tpm_matrix_path}, using generic sample names")
+        sample_names = None
+    else:
         with open(tpm_matrix_path, 'r') as f:
             first_line = f.readline().strip()
             sample_names = first_line.split('\t')
         print(f"Loaded {len(sample_names)} sample names from TPM matrix")
-    else:
-        print(f"Warning: TPM matrix not found at {tpm_matrix_path}")
 
-    # Insert samples
-    sample_id_map = {}
-    if sample_names:
-        for idx, name in enumerate(sample_names):
-            c.execute("INSERT INTO samples (name) VALUES (?)", (name,))
-            sample_id_map[idx] = c.lastrowid
-    else:
-        # Fallback: will determine number of samples from PSI files later
-        pass
-
-    # Parse event metadata from .ioe files
-    events_dir = os.path.join(expressed_stats["group_dir"], "events")
-    if not os.path.isdir(events_dir):
-        print(f"Warning: events directory not found: {events_dir}, skipping event metadata")
-        event_metadata = {}
-    else:
-        try:
-            event_metadata = parse_ioe_detailed(events_dir)
-            print(f"Loaded metadata for {len(event_metadata)} events")
-        except Exception as e:
-            print(f"Warning: Failed to parse event metadata: {e}, continuing without metadata")
-            event_metadata = {}
-
-    psi_dir = expressed_stats.get("psi_dir")
+    # 确定样本名（如果没有，从 PSI 文件推测）
+    psi_dir = stats.get("psi_dir")
     if not psi_dir or not os.path.isdir(psi_dir):
         print(f"Warning: PSI directory not found: {psi_dir}")
         conn.close()
@@ -424,25 +389,24 @@ def save_detailed_psi_to_db(expressed_stats, tpm_matrix_path, db_path="stats.db"
         conn.close()
         return
 
-    # Determine number of samples if not known
+    # 如果 sample_names 为空，从第一个 PSI 文件推测
     if not sample_names:
-        # Assume all PSI files have same number of columns; take first file
         with open(psi_files[0], 'r') as f:
             first_line = f.readline().strip()
             parts = first_line.split('\t')
             num_samples = len(parts) - 1
             sample_names = [f"sample_{i+1}" for i in range(num_samples)]
-        # Insert samples
-        for name in sample_names:
-            c.execute("INSERT INTO samples (name) VALUES (?)", (name,))
-            sample_id_map = {i: c.lastrowid for i, _ in enumerate(sample_names)}
         print(f"Using generic sample names: {num_samples} samples")
 
-    # Insert PSI data
+    # 遍历所有 PSI 文件
     for psi_file in psi_files:
         basename = os.path.basename(psi_file)
-        match = re.match(r'([A-Z0-9]+)\.psi', basename)
-        event_type_from_file = match.group(1) if match else "unknown"
+        # 从文件名提取事件类型，例如 "SE_SE_strict.psi" -> "SE"
+        match = re.match(r'([A-Z0-9]+)(?:_[A-Z0-9]+)?\.psi', basename)
+        if match:
+            event_type_from_file = match.group(1)
+        else:
+            event_type_from_file = "unknown"
 
         with open(psi_file, 'r') as f:
             for line in f:
@@ -452,38 +416,41 @@ def save_detailed_psi_to_db(expressed_stats, tpm_matrix_path, db_path="stats.db"
                 parts = line.split('\t')
                 if len(parts) < 2:
                     continue
-                event_id_str = parts[0]
+                event_id = parts[0]
                 sample_vals = parts[1:]
 
-                # Get metadata
-                meta = event_metadata.get(event_id_str, {})
-                etype = meta.get('type', event_type_from_file)
-                chrom = meta.get('chrom', '')
-                start = meta.get('start', 0)
-                end = meta.get('end', 0)
-                strand = meta.get('strand', '')
-                extra = meta.get('extra', '')
+                # 确定最终的事件类型：优先从事件 ID 中提取（如果有 "SE:" 等），否则用文件名提取的类型
+                event_type = event_type_from_file
+                if ':' in event_id:
+                    # 尝试从事件 ID 中提取类型，格式如 "ENSG...;SE:..." 或 "MSTRG.123;SE:..."
+                    id_parts = event_id.split(';')
+                    if len(id_parts) > 1:
+                        spec = id_parts[1]
+                        if ':' in spec:
+                            event_type = spec.split(':')[0]   # 取冒号前的部分，如 "SE"
+                # 如果还是 unknown，保留文件名提取的类型
 
-                # Insert event
-                c.execute("INSERT INTO events (event_id, event_type, chrom, start, end, strand, extra, group_id) VALUES (?,?,?,?,?,?,?,?)",
-                          (event_id_str, etype, chrom, start, end, strand, extra, group_id))
-                event_db_id = c.lastrowid
+                # 插入 events 表（如果已存在，不重复插入，但这里简单起见，每次都尝试插入，利用唯一性约束）
+                c.execute("INSERT OR IGNORE INTO events (event_id, event_type, group_name) VALUES (?,?,?)",
+                          (event_id, event_type, "enhanced"))
+                c.execute("SELECT id FROM events WHERE event_id = ?", (event_id,))
+                event_db_id = c.fetchone()[0]
 
-                # Insert PSI values for each sample
+                # 插入每个样本的 PSI 值
                 for sample_idx, val in enumerate(sample_vals):
+                    if sample_idx >= len(sample_names):
+                        continue
                     try:
                         psi_val = float(val)
                         if not np.isnan(psi_val):
-                            sample_id = sample_id_map.get(sample_idx)
-                            if sample_id is not None:
-                                c.execute("INSERT INTO event_psi (event_id, sample_id, psi_value) VALUES (?,?,?)",
-                                          (event_db_id, sample_id, psi_val))
+                            c.execute("INSERT INTO event_psi (event_id, sample_name, psi_value) VALUES (?,?,?)",
+                                      (event_db_id, sample_names[sample_idx], psi_val))
                     except ValueError:
                         continue
 
     conn.commit()
     conn.close()
-    print(f"Detailed PSI data saved to {db_path}")
+    print(f"Detailed PSI data (enhanced group) saved to {db_path}")
 
 # ------------------------------------------------------------
 # Generate HTML report (unchanged, kept as before)
