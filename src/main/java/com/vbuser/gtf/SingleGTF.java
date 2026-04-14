@@ -241,6 +241,13 @@ public class SingleGTF {
                         info.sortedBam.getAbsolutePath());
             }
 
+            // 检查 gffcompare 的 tmap 输出是否已存在，若存在则跳过
+            File sampleGffDir = new File(gffcompareDir, info.sampleName);
+            File tmapFile = new File(sampleGffDir, "g_" + info.sampleName + ".ballgown_" +info.sampleName + ".gtf.tmap");
+            if (tmapFile.exists()) {
+                System.out.println("gffcompare 结果已存在，跳过: " + info.sampleName);
+                continue;
+            }
             runGffcompare(ballgownGtf, info.sampleName);
         }
     }

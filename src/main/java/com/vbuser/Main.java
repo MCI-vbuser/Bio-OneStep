@@ -1,5 +1,6 @@
 package com.vbuser;
 
+import com.vbuser.apa.APAtrapPipeline;
 import com.vbuser.gtf.SingleGTF;
 import com.vbuser.pre.CommonEnv;
 import com.vbuser.pre.DownloadSRA;
@@ -39,6 +40,13 @@ public class Main {
         } catch (IOException | InterruptedException e) {
             System.err.println("AS 分析失败: " + e.getMessage());
             // 可根据需要决定是否继续
+        }
+        // ========================================
+        System.out.println("开始 APA 分析...");
+        try {
+            APAtrapPipeline.run(new File("."));
+        } catch (Exception e) {
+            System.err.println("APA 分析失败: " + e.getMessage());
         }
         // ========================================
 
@@ -128,6 +136,7 @@ public class Main {
         List<String> cmd = new ArrayList<>();
         cmd.add("conda");
         cmd.add("run");
+        cmd.add("--no-capture-output");
         cmd.add("-n");
         cmd.add(CONDA_ENV);
         cmd.add("python");

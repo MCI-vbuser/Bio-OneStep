@@ -9,7 +9,8 @@ public class CommonEnv {
     private static final String CONDA_ENV_NAME = "common_env";
     private static final String PYTHON_VERSION = "3.13";
     private static final String[] PACKAGES = {
-            "minimap", "fastp", "stringtie", "gffcompare", "suppa", "miranda", "gffread"
+            "minimap", "fastp", "stringtie", "gffcompare", "suppa", "miranda", "gffread",
+            "pandas", "numpy", "matplotlib", "seaborn", "scipy", "fastcluster", "scikit-learn", "bedtools"
     };
     private static final String MINICONDA_INSTALL_PATH = System.getProperty("user.home") + "/miniconda3";
     private static final String MINICONDA_INSTALLER = "Miniconda3-latest-Linux-x86_64.sh";
