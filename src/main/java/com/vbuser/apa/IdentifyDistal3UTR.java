@@ -515,8 +515,12 @@ public class IdentifyDistal3UTR {
 
                     // Perl: check if completely outside exons
                     boolean outside = true;
-                    for (int exEnd : uf.exonEnds) if (exEnd >= ui.start) { outside = false; break; }
-                    for (int exStart : uf.exonStarts) if (exStart <= ui.end) { outside = false; break; }
+                    for (int j = 0; j < uf.exonEnds.length; j++) {
+                        if (!(uf.exonEnds[j] < ui.start || uf.exonStarts[j] > ui.end)) {
+                            outside = false;
+                            break;
+                        }
+                    }
                     if (outside) continue;
 
                     // Overlap detected
@@ -552,8 +556,12 @@ public class IdentifyDistal3UTR {
 
                     // Perl: check if completely outside exons
                     boolean outside = true;
-                    for (int exEnd : uf.exonEnds) if (exEnd >= ui.start) { outside = false; break; }
-                    for (int exStart : uf.exonStarts) if (exStart <= ui.end) { outside = false; break; }
+                    for (int j = 0; j < uf.exonEnds.length; j++) {
+                        if (!(uf.exonEnds[j] < ui.start || uf.exonStarts[j] > ui.end)) {
+                            outside = false;
+                            break;
+                        }
+                    }
                     if (outside) continue;
 
                     if (ui.strand.equals(uf.strand)) {

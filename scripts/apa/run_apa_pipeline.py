@@ -368,341 +368,366 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
     with open(plot_data_json, 'r') as f:
         plot_data = json.load(f)
 
-    # 构建 HTML
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>APA Analysis Report</title>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-    <style>
-        body {{
-            background-color: #0d1117;
-            color: #c9d1d9;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-            padding: 20px;
-            margin: 0;
-        }}
-        h1, h2, h3 {{
-            color: #f0f6fc;
-            border-bottom: 1px solid #30363d;
-            padding-bottom: 0.3em;
-        }}
-        .summary-cards {{
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-            margin-bottom: 30px;
-        }}
-        .card {{
-            background-color: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            padding: 20px;
-            min-width: 180px;
-            flex: 1 0 auto;
-        }}
-        .card h3 {{
-            margin-top: 0;
-            border-bottom: none;
-            font-size: 1.1em;
-            color: #8b949e;
-        }}
-        .card .value {{
-            font-size: 2.5em;
-            font-weight: bold;
-            color: #79c0ff;
-        }}
-        .chart-container {{
-            background-color: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            padding: 20px;
-            margin-bottom: 30px;
-        }}
-        select, button {{
-            background-color: #0d1117;
-            color: #c9d1d9;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            padding: 8px 12px;
-            margin-right: 10px;
-        }}
-        .tab {{
-            display: flex;
-            gap: 5px;
-            margin-bottom: 20px;
-        }}
-        .tab button {{
-            background-color: #21262d;
-            border: none;
-        }}
-        .tab button.active {{
-            background-color: #30363d;
-            color: #f0f6fc;
-        }}
-        .plotly-graph-div {{
-            border-radius: 6px;
-        }}
-    </style>
-</head>
-<body>
-    <h1>APA Analysis Report</h1>
-
-    <div class="summary-cards">
-        <div class="card"><h3>Total Genes</h3><div class="value">{stats['total_genes']}</div></div>
-        <div class="card"><h3>Total APA Sites</h3><div class="value">{stats['total_apa_sites']}</div></div>
-        <div class="card"><h3>Multi-APA Genes</h3><div class="value">{stats['multi_apa_genes']}</div></div>
-        <div class="card"><h3>Mean Usage (avg)</h3><div class="value">{stats['mean_usage_mean']:.3f}</div></div>
-    </div>
-
-    <h2>Chromosome Distribution</h2>
-    <div class="chart-container" id="chromosome-charts"></div>
-
-    <h2>APA Site Usage</h2>
-    <div class="control-panel">
-        <label for="chrom-select">Chromosome: </label>
-        <select id="chrom-select"></select>
-    </div>
-    <div class="chart-container" id="usage-histogram"></div>
-
-    <h2>Advanced Analysis</h2>
-    <div class="tab">
-        <button class="tablinks active" onclick="showTab('site-count')">Site Count</button>
-        <button class="tablinks" onclick="showTab('major-usage')">Major Usage</button>
-        <button class="tablinks" onclick="showTab('cv')">CV</button>
-        <button class="tablinks" onclick="showTab('heatmap')">Heatmap</button>
-        <button class="tablinks" onclick="showTab('tsne')">t-SNE</button>
-    </div>
-
-    <div id="site-count" class="chart-container tab-content" style="display:block;"></div>
-    <div id="major-usage" class="chart-container tab-content" style="display:none;"></div>
-    <div id="cv" class="chart-container tab-content" style="display:none;"></div>
-    <div id="heatmap" class="chart-container tab-content" style="display:none;"></div>
-    <div id="tsne" class="chart-container tab-content" style="display:none;"></div>
-
-    <script>
-        // 深色主题模板
-        const darkTemplate = {{
-            layout: {{
-                paper_bgcolor: '#161b22',
-                plot_bgcolor: '#161b22',
-                font: {{ color: '#c9d1d9' }},
-                xaxis: {{ gridcolor: '#30363d', zerolinecolor: '#30363d' }},
-                yaxis: {{ gridcolor: '#30363d', zerolinecolor: '#30363d' }}
+    # 构建 HTML（样式部分做了重点修改，增加容器最大高度和滚动条，并居中图表）
+        html = f"""<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>APA Analysis Report</title>
+        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+        <style>
+            body {{
+                background-color: #0d1117;
+                color: #c9d1d9;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+                padding: 20px;
+                margin: 0;
             }}
-        }};
-
-        // 嵌入数据
-        const geneChromCounts = {json.dumps(gene_chrom_counts)};
-        const siteChromCounts = {json.dumps(site_chrom_counts)};
-        const chromUsage = {json.dumps(chrom_usage)};
-        const plotData = {json.dumps(plot_data)};
-
-        // ---------- 染色体分布图 ----------
-        function naturalSort(chroms) {{
-            return chroms.sort((a,b) => {{
-                const pa = a.match(/^chr(\\d+)$/i);
-                const pb = b.match(/^chr(\\d+)$/i);
-                if(pa && pb) return parseInt(pa[1]) - parseInt(pb[1]);
-                if(pa) return -1;
-                if(pb) return 1;
-                return a.localeCompare(b);
-            }});
-        }}
-
-        function drawChromosomeCharts() {{
-            const geneChroms = naturalSort(Object.keys(geneChromCounts));
-            const siteChroms = naturalSort(Object.keys(siteChromCounts));
-
-            const trace1 = {{
-                x: geneChroms,
-                y: geneChroms.map(c => geneChromCounts[c]),
-                type: 'bar',
-                name: 'Genes',
-                marker: {{ color: '#79c0ff' }}
-            }};
-            const trace2 = {{
-                x: siteChroms,
-                y: siteChroms.map(c => siteChromCounts[c]),
-                type: 'bar',
-                name: 'APA Sites',
-                marker: {{ color: '#ff7b72' }}
-            }};
-
-            Plotly.newPlot('chromosome-charts', [trace1, trace2], {{
-                ...darkTemplate.layout,
-                title: 'Gene and APA Site Counts per Chromosome',
-                barmode: 'group'
-            }});
-        }}
-
-        // ---------- 使用率直方图（按染色体）----------
-        function populateChromSelect() {{
-            const select = document.getElementById('chrom-select');
-            select.innerHTML = '<option value="all">All Chromosomes</option>';
-            naturalSort(Object.keys(chromUsage)).forEach(chrom => {{
-                const opt = document.createElement('option');
-                opt.value = chrom;
-                opt.textContent = chrom;
-                select.appendChild(opt);
-            }});
-        }}
-
-        function drawUsageHistogram(selectedChrom) {{
-            let data = selectedChrom === 'all' 
-                ? [].concat(...Object.values(chromUsage))
-                : chromUsage[selectedChrom] || [];
-
-            const trace = {{
-                x: data,
-                type: 'histogram',
-                marker: {{ color: '#7ee07f' }},
-                nbinsx: 20
-            }};
-
-            Plotly.newPlot('usage-histogram', [trace], {{
-                ...darkTemplate.layout,
-                title: `APA Site Usage Distribution (${{selectedChrom}})`,
-                xaxis: {{ title: 'Mean Usage', gridcolor: '#30363d' }},
-                yaxis: {{ title: 'Frequency', type: 'log', gridcolor: '#30363d' }}
-            }});
-        }}
-
-        // ---------- 标签页切换 ----------
-        function showTab(tabId) {{
-            document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
-            document.getElementById(tabId).style.display = 'block';
-            document.querySelectorAll('.tablinks').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
-        }}
-
-        // ---------- 绘制高级图表 ----------
-        function drawSiteCountDist() {{
-            const trace = {{
-                x: plotData.site_count_dist.labels,
-                y: plotData.site_count_dist.values,
-                type: 'bar',
-                marker: {{ color: '#a371f7' }}
-            }};
-            Plotly.newPlot('site-count', [trace], {{
-                ...darkTemplate.layout,
-                title: 'Number of APA Sites per Gene',
-                xaxis: {{ title: 'Number of Sites', tickvals: plotData.site_count_dist.labels }},
-                yaxis: {{ title: 'Frequency' }}
-            }});
-        }}
-
-        function drawMajorUsageDist() {{
-            const trace = {{
-                x: plotData.major_usage_dist,
-                type: 'histogram',
-                marker: {{ color: '#f0883e' }},
-                nbinsx: 30
-            }};
-            Plotly.newPlot('major-usage', [trace], {{
-                ...darkTemplate.layout,
-                title: 'Mean Relative Usage of Major APA Site',
-                xaxis: {{ title: 'Mean Relative Usage' }},
-                yaxis: {{ title: 'Number of Genes' }}
-            }});
-        }}
-
-        function drawCVDist() {{
-            const trace1 = {{
-                x: plotData.cv_expression,
-                type: 'histogram',
-                name: 'Expression CV',
-                marker: {{ color: '#79c0ff' }},
-                opacity: 0.7,
-                nbinsx: 30
-            }};
-            const trace2 = {{
-                x: plotData.cv_rel_usage,
-                type: 'histogram',
-                name: 'Relative Usage CV',
-                marker: {{ color: '#7ee07f' }},
-                opacity: 0.7,
-                nbinsx: 30
-            }};
-            Plotly.newPlot('cv', [trace1, trace2], {{
-                ...darkTemplate.layout,
-                title: 'Coefficient of Variation (CV) Distribution',
-                xaxis: {{ title: 'CV' }},
-                yaxis: {{ title: 'Frequency' }},
-                barmode: 'overlay'
-            }});
-        }}
-
-        function drawHeatmap() {{
-            if (!plotData.heatmap_data) {{
-                document.getElementById('heatmap').innerHTML = '<p>Not enough data for heatmap.</p>';
-                return;
+            h1, h2, h3 {{
+                color: #f0f6fc;
+                border-bottom: 1px solid #30363d;
+                padding-bottom: 0.3em;
             }}
-            const hm = plotData.heatmap_data;
-            const trace = {{
-                z: hm.values,
-                x: hm.columns,
-                y: hm.genes,
-                type: 'heatmap',
-                colorscale: 'Viridis',
-                colorbar: {{ title: 'Rel. Usage' }}
-            }};
-            Plotly.newPlot('heatmap', [trace], {{
-                ...darkTemplate.layout,
-                title: 'APA Usage Heatmap (Clustered)',
-                height: Math.max(600, hm.genes.length * 10),
-                xaxis: {{ title: 'APA Site' }},
-                yaxis: {{ title: 'Gene', automargin: true }}
-            }});
-        }}
-
-        function drawTSNE() {{
-            if (!plotData.tsne) {{
-                document.getElementById('tsne').innerHTML = '<p>t-SNE not available (sklearn missing or insufficient genes).</p>';
-                return;
+            .summary-cards {{
+                display: flex;
+                gap: 20px;
+                flex-wrap: wrap;
+                margin-bottom: 30px;
             }}
-            const tsne = plotData.tsne;
-            const trace = {{
-                x: tsne.x,
-                y: tsne.y,
-                mode: 'markers',
-                type: 'scatter',
-                text: tsne.genes,
-                marker: {{
-                    size: 8,
-                    color: tsne.clusters,
-                    colorscale: 'Portland',
-                    showscale: true,
-                    colorbar: {{ title: 'Cluster' }}
+            .card {{
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 20px;
+                min-width: 180px;
+                flex: 1 0 auto;
+            }}
+            .card h3 {{
+                margin-top: 0;
+                border-bottom: none;
+                font-size: 1.1em;
+                color: #8b949e;
+            }}
+            .card .value {{
+                font-size: 2.5em;
+                font-weight: bold;
+                color: #79c0ff;
+            }}
+            .chart-container {{
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 20px;
+                margin-bottom: 30px;
+                /* 限制高度，启用滚动条 */
+                max-height: 600px;
+                overflow-y: auto;
+                /* 改为块级元素，通过内部 margin auto 居中 */
+                display: block;
+                text-align: center;
+            }}
+            /* 单独调整热图容器高度 */
+            #heatmap.chart-container {{
+                max-height: 700px;
+            }}
+            /* 强制 Plotly 生成的图表容器水平居中 */
+            .chart-container .js-plotly-plot,
+            .chart-container .plot-container,
+            .chart-container .svg-container {{
+                margin-left: auto !important;
+                margin-right: auto !important;
+                display: block;
+                width: auto !important;
+                max-width: 100%;
+            }}
+            /* 处理 user-select-none 类 */
+            .chart-container .user-select-none {{
+                margin-left: auto !important;
+                margin-right: auto !important;
+            }}
+            select, button {{
+                background-color: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px 12px;
+                margin-right: 10px;
+            }}
+            .tab {{
+                display: flex;
+                gap: 5px;
+                margin-bottom: 20px;
+            }}
+            .tab button {{
+                background-color: #21262d;
+                border: none;
+            }}
+            .tab button.active {{
+                background-color: #30363d;
+                color: #f0f6fc;
+            }}
+            .control-panel {{
+                margin-bottom: 15px;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>APA Analysis Report</h1>
+
+        <div class="summary-cards">
+            <div class="card"><h3>Total Genes</h3><div class="value">{stats['total_genes']}</div></div>
+            <div class="card"><h3>Total APA Sites</h3><div class="value">{stats['total_apa_sites']}</div></div>
+            <div class="card"><h3>Multi-APA Genes</h3><div class="value">{stats['multi_apa_genes']}</div></div>
+            <div class="card"><h3>Mean Usage (avg)</h3><div class="value">{stats['mean_usage_mean']:.3f}</div></div>
+        </div>
+
+        <h2>Chromosome Distribution</h2>
+        <div class="chart-container" id="chromosome-charts"></div>
+
+        <h2>APA Site Usage</h2>
+        <div class="control-panel">
+            <label for="chrom-select">Chromosome: </label>
+            <select id="chrom-select"></select>
+        </div>
+        <div class="chart-container" id="usage-histogram"></div>
+
+        <h2>Advanced Analysis</h2>
+        <div class="tab">
+            <button class="tablinks active" onclick="showTab('site-count')">Site Count</button>
+            <button class="tablinks" onclick="showTab('major-usage')">Major Usage</button>
+            <button class="tablinks" onclick="showTab('cv')">CV</button>
+            <button class="tablinks" onclick="showTab('heatmap')">Heatmap</button>
+            <button class="tablinks" onclick="showTab('tsne')">t-SNE</button>
+        </div>
+
+        <div id="site-count" class="chart-container tab-content" style="display:block;"></div>
+        <div id="major-usage" class="chart-container tab-content" style="display:none;"></div>
+        <div id="cv" class="chart-container tab-content" style="display:none;"></div>
+        <div id="heatmap" class="chart-container tab-content" style="display:none;"></div>
+        <div id="tsne" class="chart-container tab-content" style="display:none;"></div>
+
+        <script>
+            // 深色主题模板
+            const darkTemplate = {{
+                layout: {{
+                    paper_bgcolor: '#161b22',
+                    plot_bgcolor: '#161b22',
+                    font: {{ color: '#c9d1d9' }},
+                    xaxis: {{ gridcolor: '#30363d', zerolinecolor: '#30363d' }},
+                    yaxis: {{ gridcolor: '#30363d', zerolinecolor: '#30363d' }}
                 }}
             }};
-            Plotly.newPlot('tsne', [trace], {{
-                ...darkTemplate.layout,
-                title: 't-SNE Projection of Genes (Colored by Cluster)',
-                xaxis: {{ title: 't-SNE 1' }},
-                yaxis: {{ title: 't-SNE 2' }}
-            }});
-        }}
 
-        // ---------- 初始化 ----------
-        window.onload = function() {{
-            drawChromosomeCharts();
-            populateChromSelect();
-            drawUsageHistogram('all');
-            document.getElementById('chrom-select').addEventListener('change', e => drawUsageHistogram(e.target.value));
+            // 嵌入数据
+            const geneChromCounts = {json.dumps(gene_chrom_counts)};
+            const siteChromCounts = {json.dumps(site_chrom_counts)};
+            const chromUsage = {json.dumps(chrom_usage)};
+            const plotData = {json.dumps(plot_data)};
 
-            drawSiteCountDist();
-            drawMajorUsageDist();
-            drawCVDist();
-            drawHeatmap();
-            drawTSNE();
-        }};
-    </script>
-</body>
-</html>
-"""
+            // ---------- 染色体分布图 ----------
+            function naturalSort(chroms) {{
+                return chroms.sort((a,b) => {{
+                    const pa = a.match(/^chr(\\d+)$/i);
+                    const pb = b.match(/^chr(\\d+)$/i);
+                    if(pa && pb) return parseInt(pa[1]) - parseInt(pb[1]);
+                    if(pa) return -1;
+                    if(pb) return 1;
+                    return a.localeCompare(b);
+                }});
+            }}
+
+            function drawChromosomeCharts() {{
+                const geneChroms = naturalSort(Object.keys(geneChromCounts));
+                const siteChroms = naturalSort(Object.keys(siteChromCounts));
+
+                const trace1 = {{
+                    x: geneChroms,
+                    y: geneChroms.map(c => geneChromCounts[c]),
+                    type: 'bar',
+                    name: 'Genes',
+                    marker: {{ color: '#79c0ff' }}
+                }};
+                const trace2 = {{
+                    x: siteChroms,
+                    y: siteChroms.map(c => siteChromCounts[c]),
+                    type: 'bar',
+                    name: 'APA Sites',
+                    marker: {{ color: '#ff7b72' }}
+                }};
+
+                Plotly.newPlot('chromosome-charts', [trace1, trace2], {{
+                    ...darkTemplate.layout,
+                    title: 'Gene and APA Site Counts per Chromosome',
+                    barmode: 'group'
+                }});
+            }}
+
+            // ---------- 使用率直方图（按染色体）----------
+            function populateChromSelect() {{
+                const select = document.getElementById('chrom-select');
+                select.innerHTML = '<option value="all">All Chromosomes</option>';
+                naturalSort(Object.keys(chromUsage)).forEach(chrom => {{
+                    const opt = document.createElement('option');
+                    opt.value = chrom;
+                    opt.textContent = chrom;
+                    select.appendChild(opt);
+                }});
+            }}
+
+            function drawUsageHistogram(selectedChrom) {{
+                let data = selectedChrom === 'all' 
+                    ? [].concat(...Object.values(chromUsage))
+                    : chromUsage[selectedChrom] || [];
+
+                const trace = {{
+                    x: data,
+                    type: 'histogram',
+                    marker: {{ color: '#7ee07f' }},
+                    nbinsx: 20
+                }};
+
+                Plotly.newPlot('usage-histogram', [trace], {{
+                    ...darkTemplate.layout,
+                    title: `APA Site Usage Distribution (${{selectedChrom}})`,
+                    xaxis: {{ title: 'Mean Usage', gridcolor: '#30363d' }},
+                    yaxis: {{ title: 'Frequency', type: 'log', gridcolor: '#30363d' }}
+                }});
+            }}
+
+            // ---------- 标签页切换 ----------
+            function showTab(tabId) {{
+                document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+                document.getElementById(tabId).style.display = 'block';
+                document.querySelectorAll('.tablinks').forEach(btn => btn.classList.remove('active'));
+                event.target.classList.add('active');
+            }}
+
+            // ---------- 绘制高级图表 ----------
+            function drawSiteCountDist() {{
+                const trace = {{
+                    x: plotData.site_count_dist.labels,
+                    y: plotData.site_count_dist.values,
+                    type: 'bar',
+                    marker: {{ color: '#a371f7' }}
+                }};
+                Plotly.newPlot('site-count', [trace], {{
+                    ...darkTemplate.layout,
+                    title: 'Number of APA Sites per Gene',
+                    xaxis: {{ title: 'Number of Sites', tickvals: plotData.site_count_dist.labels }},
+                    yaxis: {{ title: 'Frequency' }}
+                }});
+            }}
+
+            function drawMajorUsageDist() {{
+                const trace = {{
+                    x: plotData.major_usage_dist,
+                    type: 'histogram',
+                    marker: {{ color: '#f0883e' }},
+                    nbinsx: 30
+                }};
+                Plotly.newPlot('major-usage', [trace], {{
+                    ...darkTemplate.layout,
+                    title: 'Mean Relative Usage of Major APA Site',
+                    xaxis: {{ title: 'Mean Relative Usage' }},
+                    yaxis: {{ title: 'Number of Genes' }}
+                }});
+            }}
+
+            function drawCVDist() {{
+                const trace1 = {{
+                    x: plotData.cv_expression,
+                    type: 'histogram',
+                    name: 'Expression CV',
+                    marker: {{ color: '#79c0ff' }},
+                    opacity: 0.7,
+                    nbinsx: 30
+                }};
+                const trace2 = {{
+                    x: plotData.cv_rel_usage,
+                    type: 'histogram',
+                    name: 'Relative Usage CV',
+                    marker: {{ color: '#7ee07f' }},
+                    opacity: 0.7,
+                    nbinsx: 30
+                }};
+                Plotly.newPlot('cv', [trace1, trace2], {{
+                    ...darkTemplate.layout,
+                    title: 'Coefficient of Variation (CV) Distribution',
+                    xaxis: {{ title: 'CV' }},
+                    yaxis: {{ title: 'Frequency' }},
+                    barmode: 'overlay'
+                }});
+            }}
+
+            function drawHeatmap() {{
+                if (!plotData.heatmap_data) {{
+                    document.getElementById('heatmap').innerHTML = '<p>Not enough data for heatmap.</p>';
+                    return;
+                }}
+                const hm = plotData.heatmap_data;
+                const trace = {{
+                    z: hm.values,
+                    x: hm.columns,
+                    y: hm.genes,
+                    type: 'heatmap',
+                    colorscale: 'Viridis',
+                    colorbar: {{ title: 'Rel. Usage' }}
+                }};
+                Plotly.newPlot('heatmap', [trace], {{
+                    ...darkTemplate.layout,
+                    title: 'APA Usage Heatmap (Clustered)',
+                    height: Math.max(600, hm.genes.length * 10),
+                    xaxis: {{ title: 'APA Site' }},
+                    yaxis: {{ title: 'Gene', automargin: true }}
+                }});
+            }}
+
+            function drawTSNE() {{
+                if (!plotData.tsne) {{
+                    document.getElementById('tsne').innerHTML = '<p>t-SNE not available (sklearn missing or insufficient genes).</p>';
+                    return;
+                }}
+                const tsne = plotData.tsne;
+                const trace = {{
+                    x: tsne.x,
+                    y: tsne.y,
+                    mode: 'markers',
+                    type: 'scatter',
+                    text: tsne.genes,
+                    marker: {{
+                        size: 8,
+                        color: tsne.clusters,
+                        colorscale: 'Portland',
+                        showscale: true,
+                        colorbar: {{ title: 'Cluster' }}
+                    }}
+                }};
+                Plotly.newPlot('tsne', [trace], {{
+                    ...darkTemplate.layout,
+                    title: 't-SNE Projection of Genes (Colored by Cluster)',
+                    xaxis: {{ title: 't-SNE 1' }},
+                    yaxis: {{ title: 't-SNE 2' }}
+                }});
+            }}
+
+            // ---------- 初始化 ----------
+            window.onload = function() {{
+                drawChromosomeCharts();
+                populateChromSelect();
+                drawUsageHistogram('all');
+                document.getElementById('chrom-select').addEventListener('change', e => drawUsageHistogram(e.target.value));
+
+                drawSiteCountDist();
+                drawMajorUsageDist();
+                drawCVDist();
+                drawHeatmap();
+                drawTSNE();
+            }};
+        </script>
+    </body>
+    </html>
+    """
     report_path = os.path.join(outdir, f"{prefix}_report.html")
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(html)

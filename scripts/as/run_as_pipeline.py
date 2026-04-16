@@ -323,7 +323,7 @@ def main():
 
     # 只为 expressed 组保存详细数据，传入 TPM 矩阵路径
     as_stats.save_detailed_psi_to_db(stats_list[1], tpm_matrix, os.path.join(output_dir, "stats.db"))
-    as_stats.generate_html(stats_list, os.path.join(output_dir, "index.html"))
+    as_stats.generate_html(stats_list, os.path.join(output_dir, "as_report.html"))
     print("Statistics report generated.")
 
 if __name__ == "__main__":
