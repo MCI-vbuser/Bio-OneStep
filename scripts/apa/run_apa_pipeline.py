@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-APA 分析完整流水线（全前端图表版）
+APA 分析流水线（精简版，移除无用单碱基序列生成，改为提取完整 UTR）
 用法: python run_apa_pipeline.py --all_results all_apa_results.txt --predictions apa_predictions.txt \
         --utr refined_3utr.bed --genome hg38.fa --outdir ./output --prefix my_analysis
 """
@@ -16,7 +16,6 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 from scipy.cluster.hierarchy import linkage, fcluster, leaves_list
-from scipy.spatial.distance import pdist
 
 
 # ---------- 1. apa_summary 模块 ----------
@@ -91,30 +90,30 @@ def apa_summary(all_results_file, outdir, prefix=None):
     return summary, long_df
 
 
-# ---------- 2. deapa 模块 ----------
-def generate_apa_sites(pred_df, output_bed):
-    records = []
-    for idx, row in pred_df.iterrows():
-        chrom = row['chrom']
-        sites = str(row['Predicted_APA']).split(',')
-        for i, site in enumerate(sites):
-            site = site.strip()
-            coord = site.split(':')[1].split('-')[0] if ':' in site else site
-            try:
-                start = int(coord) - 1
-                end = start + 1
-            except:
-                continue
-            records.append([chrom, start, end, f"{row['Gene']}_site{i + 1}"])
-    bed_df = pd.DataFrame(records, columns=['chrom', 'start', 'end', 'name'])
-    bed_df.to_csv(output_bed, sep='\t', header=False, index=False)
-    print(f"生成 {output_bed}，共 {len(bed_df)} 个位点")
+# ---------- 2. deapa 模块（精简版，移除无用 BED/FA 生成）----------
+def generate_utr_sequences_for_apa_genes(pred_df, utr_bed, genome_fa, output_fa):
+    """提取含 APA 事件的基因的完整 3'UTR 序列（用于 motif 分析）"""
+    apa_genes = set(pred_df['Gene'].unique())
 
+    if not os.path.exists(utr_bed):
+        print(f"警告: UTR 文件不存在 {utr_bed}，跳过序列提取。")
+        return
 
-def generate_apa_sequences(apa_sites_bed, genome_fa, output_fa):
-    cmd = f"bedtools getfasta -fi {genome_fa} -bed {apa_sites_bed} -fo {output_fa}"
+    utr_df = pd.read_csv(utr_bed, sep='\t', header=None,
+                         names=['chrom', 'start', 'end', 'gene', 'score', 'strand'])
+    filtered_utr = utr_df[utr_df['gene'].isin(apa_genes)]
+
+    if filtered_utr.empty:
+        print("警告: 没有找到任何 APA 基因对应的 UTR 区间，序列提取跳过。")
+        return
+
+    temp_bed = output_fa.replace('.fa', '.bed')
+    filtered_utr.to_csv(temp_bed, sep='\t', header=False, index=False)
+
+    cmd = f"bedtools getfasta -fi {genome_fa} -bed {temp_bed} -fo {output_fa} -name"
     subprocess.run(cmd, shell=True, check=True)
-    print(f"生成 {output_fa}")
+    os.remove(temp_bed)
+    print(f"生成 UTR 序列文件: {output_fa}")
 
 
 def generate_gene_level_summary(pred_df, output_file):
@@ -182,12 +181,11 @@ def deapa_module(predictions_file, utr_file, genome_file, outdir, prefix=None):
 
     pred_df['chrom'] = pred_df['Gene'].apply(extract_chrom)
 
-    sites_bed = os.path.join(outdir, f"{prefix}_apa_sites.bed" if prefix else "apa_sites.bed")
-    generate_apa_sites(pred_df, sites_bed)
+    # 生成 UTR 序列文件（用于 motif 分析）
+    utr_fa = os.path.join(outdir, f"{prefix}_utr_sequences.fa" if prefix else "utr_sequences.fa")
+    generate_utr_sequences_for_apa_genes(pred_df, utr_file, genome_file, utr_fa)
 
-    seq_fa = os.path.join(outdir, f"{prefix}_apa_sequences.fa" if prefix else "apa_sequences.fa")
-    generate_apa_sequences(sites_bed, genome_file, seq_fa)
-
+    # 生成表格文件
     gene_summary = os.path.join(outdir,
                                 f"{prefix}_apa_gene_level_summary.txt" if prefix else "apa_gene_level_summary.txt")
     generate_gene_level_summary(pred_df, gene_summary)
@@ -202,9 +200,8 @@ def deapa_module(predictions_file, utr_file, genome_file, outdir, prefix=None):
     print("deapa 模块完成。")
 
 
-# ---------- 3. further 模块（仅计算数据，不绘图）----------
+# ---------- 3. further 模块（计算前端绘图数据）----------
 def further_module(all_results_file, outdir, prefix):
-    """计算所有图表所需的数据并保存为 JSON"""
     print("正在执行 further 模块（计算前端绘图数据）...")
     df = pd.read_csv(all_results_file, sep='\t')
 
@@ -256,38 +253,30 @@ def further_module(all_results_file, outdir, prefix):
         n_samples=('Sample', 'count')
     ).reset_index()
 
-    # 保存汇总表
     summary.to_csv(os.path.join(outdir, f"{prefix}_summary.txt"), sep='\t', index=False)
 
-    # ----- 准备前端绘图数据 -----
+    # 准备前端绘图数据
     plot_data = {}
-
-    # 1. 位点数量分布
     site_count = summary.groupby('Gene')['Site_Index'].max().value_counts().sort_index()
     plot_data['site_count_dist'] = {
         'labels': [int(x) for x in site_count.index],
         'values': site_count.values.tolist()
     }
 
-    # 2. 主要位点使用率分布
     major_site = summary.loc[summary.groupby('Gene')['mean_rel_usage'].idxmax()]
     plot_data['major_usage_dist'] = major_site['mean_rel_usage'].tolist()
 
-    # 3. CV 数据
     df_cv = summary[summary['mean_expression'] > 0].copy()
     df_cv['cv_expression'] = df_cv['std_expression'] / df_cv['mean_expression']
     df_cv['cv_rel_usage'] = df_cv['std_rel_usage'] / df_cv['mean_rel_usage']
     plot_data['cv_expression'] = df_cv['cv_expression'].dropna().tolist()
     plot_data['cv_rel_usage'] = df_cv['cv_rel_usage'].dropna().tolist()
 
-    # 4. 宽表（用于热图与聚类）
-    wide_df = summary.pivot_table(index='Gene', columns='Site_Index', values='mean_rel_usage', aggfunc='first').fillna(
-        0)
+    wide_df = summary.pivot_table(index='Gene', columns='Site_Index', values='mean_rel_usage', aggfunc='first').fillna(0)
     wide_df.columns = [f'Site_{int(col)}' for col in wide_df.columns]
-    wide_df = wide_df.loc[(wide_df > 0).sum(axis=1) >= 2]  # 至少两个位点
+    wide_df = wide_df.loc[(wide_df > 0).sum(axis=1) >= 2]
 
     if len(wide_df) > 1:
-        # 层次聚类
         Z = linkage(wide_df.values, method='ward', metric='euclidean')
         order = leaves_list(Z)
         ordered_genes = wide_df.index[order].tolist()
@@ -298,7 +287,6 @@ def further_module(all_results_file, outdir, prefix):
             'values': wide_df.loc[ordered_genes].values.tolist()
         }
 
-        # t-SNE 降维坐标（若 sklearn 可用）
         try:
             from sklearn.manifold import TSNE
             from sklearn.preprocessing import StandardScaler
@@ -320,14 +308,13 @@ def further_module(all_results_file, outdir, prefix):
         plot_data['heatmap_data'] = None
         plot_data['tsne'] = None
 
-    # 保存 JSON
     json_path = os.path.join(outdir, f"{prefix}_plot_data.json")
     with open(json_path, 'w') as f:
         json.dump(plot_data, f, indent=2)
     print(f"前端绘图数据已保存: {json_path}")
 
 
-# ---------- 4. HTML 报告生成（全前端渲染）----------
+# ---------- 4. HTML 报告生成 ----------
 def extract_chromosome(gene_str):
     if pd.isna(gene_str):
         return 'unknown'
@@ -337,12 +324,8 @@ def extract_chromosome(gene_str):
 
 def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
     """生成包含 Plotly 交互图表的深色风格报告"""
-    # 读取必要文件
     gene_summary = pd.read_csv(os.path.join(outdir, f"{prefix}_apa_gene_level_summary.txt"), sep='\t')
     detailed = pd.read_csv(os.path.join(outdir, f"{prefix}_apa_detailed_analysis.txt"), sep='\t')
-    sites_bed = os.path.join(outdir, f"{prefix}_apa_sites.bed")
-    apa_sites = pd.read_csv(sites_bed, sep='\t', header=None,
-                            names=['chrom', 'start', 'end', 'name']) if os.path.exists(sites_bed) else pd.DataFrame()
 
     # 染色体分布数据
     gene_chrom_counts = gene_summary['Gene'].apply(extract_chromosome).value_counts().to_dict()
@@ -355,21 +338,19 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
         if usages:
             chrom_usage[chrom] = usages
 
-    # 统计卡片数据
     stats = {
         'total_genes': len(gene_summary),
-        'total_apa_sites': len(apa_sites),
+        'total_apa_sites': len(detailed),
         'multi_apa_genes': int(
             gene_summary['has_multiple_apa'].sum()) if 'has_multiple_apa' in gene_summary.columns else 0,
         'mean_usage_mean': detailed['Mean_Usage'].mean() if not detailed.empty else 0
     }
 
-    # 读取前端绘图数据
     with open(plot_data_json, 'r') as f:
         plot_data = json.load(f)
 
-    # 构建 HTML（样式部分做了重点修改，增加容器最大高度和滚动条，并居中图表）
-        html = f"""<!DOCTYPE html>
+    # HTML 内容（与之前相同，此处省略以节省篇幅，实际使用时需保留完整 HTML 模板）
+    html = f"""<!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
@@ -420,18 +401,14 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 border-radius: 6px;
                 padding: 20px;
                 margin-bottom: 30px;
-                /* 限制高度，启用滚动条 */
                 max-height: 600px;
                 overflow-y: auto;
-                /* 改为块级元素，通过内部 margin auto 居中 */
                 display: block;
                 text-align: center;
             }}
-            /* 单独调整热图容器高度 */
             #heatmap.chart-container {{
                 max-height: 700px;
             }}
-            /* 强制 Plotly 生成的图表容器水平居中 */
             .chart-container .js-plotly-plot,
             .chart-container .plot-container,
             .chart-container .svg-container {{
@@ -440,11 +417,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 display: block;
                 width: auto !important;
                 max-width: 100%;
-            }}
-            /* 处理 user-select-none 类 */
-            .chart-container .user-select-none {{
-                margin-left: auto !important;
-                margin-right: auto !important;
             }}
             select, button {{
                 background-color: #0d1117;
@@ -508,7 +480,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
         <div id="tsne" class="chart-container tab-content" style="display:none;"></div>
 
         <script>
-            // 深色主题模板
             const darkTemplate = {{
                 layout: {{
                     paper_bgcolor: '#161b22',
@@ -519,13 +490,11 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 }}
             }};
 
-            // 嵌入数据
             const geneChromCounts = {json.dumps(gene_chrom_counts)};
             const siteChromCounts = {json.dumps(site_chrom_counts)};
             const chromUsage = {json.dumps(chrom_usage)};
             const plotData = {json.dumps(plot_data)};
 
-            // ---------- 染色体分布图 ----------
             function naturalSort(chroms) {{
                 return chroms.sort((a,b) => {{
                     const pa = a.match(/^chr(\\d+)$/i);
@@ -563,7 +532,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 }});
             }}
 
-            // ---------- 使用率直方图（按染色体）----------
             function populateChromSelect() {{
                 const select = document.getElementById('chrom-select');
                 select.innerHTML = '<option value="all">All Chromosomes</option>';
@@ -576,7 +544,7 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
             }}
 
             function drawUsageHistogram(selectedChrom) {{
-                let data = selectedChrom === 'all' 
+                let data = selectedChrom === 'all'
                     ? [].concat(...Object.values(chromUsage))
                     : chromUsage[selectedChrom] || [];
 
@@ -595,7 +563,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 }});
             }}
 
-            // ---------- 标签页切换 ----------
             function showTab(tabId) {{
                 document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
                 document.getElementById(tabId).style.display = 'block';
@@ -603,7 +570,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 event.target.classList.add('active');
             }}
 
-            // ---------- 绘制高级图表 ----------
             function drawSiteCountDist() {{
                 const trace = {{
                     x: plotData.site_count_dist.labels,
@@ -711,7 +677,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
                 }});
             }}
 
-            // ---------- 初始化 ----------
             window.onload = function() {{
                 drawChromosomeCharts();
                 populateChromSelect();
@@ -735,7 +700,6 @@ def generate_html_report(outdir, prefix, pred_file, utr_file, plot_data_json):
 
 
 def create_sqlite_db(outdir, prefix):
-    """将关键表格存入 SQLite"""
     db_path = os.path.join(outdir, f"{prefix}_data.db")
     conn = sqlite3.connect(db_path)
     for fname in [f"{prefix}_apa_gene_level_summary.txt", f"{prefix}_apa_detailed_analysis.txt",
@@ -749,9 +713,8 @@ def create_sqlite_db(outdir, prefix):
     print(f"SQLite 数据库已生成: {db_path}")
 
 
-# ---------- 主函数 ----------
 def main():
-    parser = argparse.ArgumentParser(description='APA 分析完整流水线（全前端图表版）')
+    parser = argparse.ArgumentParser(description='APA 分析流水线（精简版）')
     parser.add_argument('--all_results', required=True, help='all_apa_results.txt 路径')
     parser.add_argument('--predictions', required=True, help='apa_predictions.txt 路径')
     parser.add_argument('--utr', required=True, help='refined_3utr.bed 路径')
@@ -762,20 +725,13 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # 1. apa_summary
     apa_summary(args.all_results, args.outdir, args.prefix)
-
-    # 2. deapa_module
     deapa_module(args.predictions, args.utr, args.genome, args.outdir, args.prefix)
-
-    # 3. further_module (生成 JSON 数据)
     further_module(args.all_results, args.outdir, args.prefix)
 
-    # 4. 生成 HTML 报告
     plot_json = os.path.join(args.outdir, f"{args.prefix}_plot_data.json")
     generate_html_report(args.outdir, args.prefix, args.predictions, args.utr, plot_json)
 
-    # 5. 生成 SQLite 数据库
     create_sqlite_db(args.outdir, args.prefix)
 
     print("\n所有分析完成！请打开以下文件查看交互式报告：")

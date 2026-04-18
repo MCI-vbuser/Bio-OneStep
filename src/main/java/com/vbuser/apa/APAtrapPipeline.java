@@ -29,8 +29,10 @@ public class APAtrapPipeline {
         baseDir = baseDirectory;
         initDirsAndFiles();
 
-        // 1. （可选）验证 Java 类可用性，已由编译器保证
-        System.out.println("使用 Java 重写的 APAtrap 工具。");
+        if(new File("./apa/results/apa_data.db").exists()){
+            System.out.println("APA分析已完成，跳过");
+            return;
+        }
 
         // 2. 生成染色体大小文件
         generateChromSizes();
