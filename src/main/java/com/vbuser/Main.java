@@ -4,6 +4,7 @@ import com.vbuser.apa.APAtrapPipeline;
 import com.vbuser.gtf.SingleGTF;
 import com.vbuser.pre.CommonEnv;
 import com.vbuser.pre.DownloadSRA;
+import com.vbuser.rbp.DeepRiPeRbpAnalyzer;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -41,7 +42,6 @@ public class Main {
             runAsPipeline();
         } catch (IOException | InterruptedException e) {
             System.err.println("AS 分析失败: " + e.getMessage());
-            // 可根据需要决定是否继续
         }
         // ========================================
         System.out.println("开始 APA 分析...");
@@ -55,6 +55,12 @@ public class Main {
             runMotifAnalysis();
         } catch (Exception e) {
             System.err.println("Motif 分析失败: " + e.getMessage());
+        }
+        // ========================================
+        try {
+            DeepRiPeRbpAnalyzer.runFullAnalysis();
+        } catch (Exception e) {
+            System.err.println("DeepRiPe RBP 分析失败: " + e.getMessage());
         }
         // ========================================
         System.out.println("战至最后一刻!自刎归天!");
@@ -270,14 +276,26 @@ public class Main {
             System.err.println("警告：未找到 meme.txt 或 dreme.txt，跳过 Tomtom。");
         }
 
-        // ---------- 8. 生成报告 ----------
+        // ---------- 8. 生成统计报告（数据库 + HTML） ----------
         System.out.println("生成 Motif 统计报告...");
         File motifPy = new File("./scripts/motif/motif.py");
         if (!motifPy.exists()) {
             System.err.println("警告：motif.py 脚本缺失，跳过报告生成。");
-            return;
+        } else {
+            File memeXml = new File(motifDir, "meme_results/meme.xml");
+            File dremeXml = new File(motifDir, "dreme_results/dreme.xml");
+            File tomtomXml = new File(motifDir, "tomtom_results/tomtom.xml");
+            if (memeXml.exists() && dremeXml.exists() && tomtomXml.exists()) {
+                runCondaCommand(CONDA_ENV, "python", motifPy.getAbsolutePath(),
+                        "--meme", memeXml.getAbsolutePath(),
+                        "--dreme", dremeXml.getAbsolutePath(),
+                        "--tomtom", tomtomXml.getAbsolutePath(),
+                        "--output-dir", motifDir.getAbsolutePath());
+                System.out.println("报告已生成：" + new File(motifDir, "motif_report.html").getAbsolutePath());
+            } else {
+                System.err.println("缺少 XML 文件，无法生成报告。");
+            }
         }
-
 
 
         System.out.println("Motif 分析完成，结果保存于 " + motifDir.getAbsolutePath());
