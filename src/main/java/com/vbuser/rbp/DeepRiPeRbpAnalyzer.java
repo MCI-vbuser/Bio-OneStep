@@ -26,6 +26,10 @@ public class DeepRiPeRbpAnalyzer {
         Files.createDirectories(Paths.get(ADVANCED_DIR));
         // 确保 motif 目录存在（用于存放报告）
         Files.createDirectories(Paths.get("./rbp"));
+        if(new File("./rbp/rbp_data.db").exists()){
+            System.out.println("RBP分析已完成,跳过...");
+            return;
+        }
 
         setupEnvironment();
         runPrediction();

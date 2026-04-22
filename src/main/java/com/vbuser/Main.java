@@ -7,11 +7,13 @@ import com.vbuser.pre.DownloadSRA;
 import com.vbuser.rbp.DeepRiPeRbpAnalyzer;
 
 import java.io.*;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.*;
 
 public class Main {
 
@@ -61,6 +63,14 @@ public class Main {
             DeepRiPeRbpAnalyzer.runFullAnalysis();
         } catch (Exception e) {
             System.err.println("DeepRiPe RBP 分析失败: " + e.getMessage());
+        }
+        // ========================================
+        // 新增：miRNA 靶点预测分析
+        System.out.println("开始 miRNA 靶点预测分析...");
+        try {
+            runMiRNAAnalysis();
+        } catch (Exception e) {
+            System.err.println("miRNA 分析失败: " + e.getMessage());
         }
         // ========================================
         System.out.println("战至最后一刻!自刎归天!");
@@ -390,6 +400,243 @@ public class Main {
             new ProcessBuilder("bash", "-c", "clear").inheritIO().start().waitFor();
         } catch (InterruptedException | IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    static boolean ignored;
+
+    /**
+     * 运行 miRNA 靶点预测分析（使用 miranda）
+     */
+    private static void runMiRNAAnalysis() throws IOException, InterruptedException, ExecutionException {
+        // 输出目录
+        File mirnaDir = new File("./mirna");
+        if (!mirnaDir.exists() && !mirnaDir.mkdirs()) {
+            throw new IOException("无法创建目录: " + mirnaDir.getAbsolutePath());
+        }
+
+        // 最终结果文件
+        File finalResult = new File(mirnaDir, "miranda_results.txt");
+        if (finalResult.exists() && finalResult.length() > 0) {
+            System.out.println("miRNA 靶点预测已完成，结果文件存在: " + finalResult.getAbsolutePath());
+            return;
+        }
+
+        // 1. 确保目标转录本序列文件存在（从增强 GTF 生成）
+        File targetFasta = ensureTargetFastaForMiRNA();
+        System.out.println("目标转录本序列文件: " + targetFasta.getAbsolutePath());
+
+        // 2. 下载并准备人类成熟 miRNA 序列文件
+        File humanMirnaFasta = prepareHumanMirnaFasta(mirnaDir);
+        System.out.println("人类成熟 miRNA 序列文件: " + humanMirnaFasta.getAbsolutePath());
+
+        // 3. 将 miRNA fasta 分割成 16 份
+        List<File> splitFiles = splitFasta(humanMirnaFasta, mirnaDir);
+        System.out.println("miRNA 序列已分割为 " + splitFiles.size() + " 份");
+
+        // 4. 并行运行 miranda
+        ExecutorService executor = Executors.newFixedThreadPool(16);
+        List<Future<File>> futures = new ArrayList<>();
+        for (int i = 0; i < splitFiles.size(); i++) {
+            final int idx = i;
+            final File splitFile = splitFiles.get(i);
+            Future<File> future = executor.submit(() -> {
+                File outFile = new File(mirnaDir, "miranda_part_" + idx + ".txt");
+                runMiranda(splitFile, targetFasta, outFile);
+                return outFile;
+            });
+            futures.add(future);
+        }
+
+        // 5. 等待所有任务完成并收集输出文件
+        List<File> partResults = new ArrayList<>();
+        for (Future<File> future : futures) {
+            try {
+                partResults.add(future.get());
+            } catch (InterruptedException | ExecutionException e) {
+                System.err.println("miranda 并行任务失败: " + e.getMessage());
+                executor.shutdownNow();
+                throw e;
+            }
+        }
+        executor.shutdown();
+        ignored = executor.awaitTermination(10, TimeUnit.MINUTES);
+
+        // 6. 合并结果
+        mergeMirandaResults(partResults, finalResult);
+        System.out.println("miRNA 靶点预测完成，合并结果保存至: " + finalResult.getAbsolutePath());
+
+        // 可选：清理临时文件
+        for (File f : splitFiles) {
+            ignored = f.delete();
+        }
+        for (File f : partResults) {
+            ignored = f.delete();
+        }
+    }
+
+    /**
+     * 确保用于 miRNA 靶点预测的目标转录本序列文件存在（从 gencode.v45.enhanced.gtf 生成）
+     */
+    private static File ensureTargetFastaForMiRNA() throws IOException, InterruptedException {
+        File targetFasta = new File("./as/gencode.v45.enhanced.transcripts.fa");
+        if (targetFasta.exists()) {
+            return targetFasta;
+        }
+
+        File enhancedGtf = new File("./as/gencode.v45.enhanced.gtf");
+        if (!enhancedGtf.exists()) {
+            throw new IOException("增强 GTF 文件不存在: " + enhancedGtf.getAbsolutePath());
+        }
+
+        File refGenome = new File("hg38.fa");
+        if (!refGenome.exists()) {
+            throw new IOException("参考基因组 hg38.fa 不存在");
+        }
+
+        System.out.println("使用 gffread 从增强 GTF 生成转录本序列文件...");
+        runCondaCommand(CONDA_ENV, "gffread", "-w", targetFasta.getAbsolutePath(),
+                "-g", refGenome.getAbsolutePath(), enhancedGtf.getAbsolutePath());
+        return targetFasta;
+    }
+
+    /**
+     * 下载 miRBase 成熟 miRNA 序列，过滤出人类条目（hsa-）
+     */
+    private static File prepareHumanMirnaFasta(File mirnaDir) throws IOException {
+        File matureFasta = new File(mirnaDir, "mature.fa");
+        File humanFasta = new File(mirnaDir, "hsa_mature.fa");
+
+        // 如果已存在人类过滤文件，直接返回
+        if (humanFasta.exists() && humanFasta.length() > 0) {
+            return humanFasta;
+        }
+
+        // 下载成熟 miRNA 文件（如果不存在）
+        if (!matureFasta.exists()) {
+            System.out.println("下载 miRBase 成熟 miRNA 序列...");
+            String mirbaseUrl = "https://www.mirbase.org/download/mature.fa";
+            try (InputStream in = new URL(mirbaseUrl).openStream();
+                 FileOutputStream fos = new FileOutputStream(matureFasta)) {
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    fos.write(buffer, 0, len);
+                }
+            }
+        }
+
+        // 过滤人类条目（header 以 >hsa- 开头）
+        System.out.println("过滤人类成熟 miRNA 序列...");
+        try (BufferedReader reader = new BufferedReader(new FileReader(matureFasta));
+             BufferedWriter writer = new BufferedWriter(new FileWriter(humanFasta))) {
+            String line;
+            boolean keep = false;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith(">")) {
+                    keep = line.startsWith(">hsa-");
+                }
+                if (keep) {
+                    writer.write(line);
+                    writer.newLine();
+                }
+            }
+        }
+
+        return humanFasta;
+    }
+
+    /**
+     * 将 FASTA 文件分割成指定份数（尽量均匀）
+     */
+    private static List<File> splitFasta(File inputFasta, File outputDir) throws IOException {
+        List<File> splitFiles = new ArrayList<>();
+        // 先读取所有条目
+        List<String> headers = new ArrayList<>();
+        List<String> sequences = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(inputFasta))) {
+            String line;
+            StringBuilder seq = new StringBuilder();
+            String currentHeader = null;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith(">")) {
+                    if (currentHeader != null) {
+                        headers.add(currentHeader);
+                        sequences.add(seq.toString());
+                    }
+                    currentHeader = line;
+                    seq = new StringBuilder();
+                } else {
+                    seq.append(line.trim());
+                }
+            }
+            // 最后一个条目
+            if (currentHeader != null) {
+                headers.add(currentHeader);
+                sequences.add(seq.toString());
+            }
+        }
+
+        int total = headers.size();
+        int perPart = (int) Math.ceil((double) total / 16);
+        for (int i = 0; i < 16; i++) {
+            int start = i * perPart;
+            int end = Math.min(start + perPart, total);
+            if (start >= total) break;
+
+            File partFile = new File(outputDir, "hsa_mature_part_" + i + ".fa");
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(partFile))) {
+                for (int j = start; j < end; j++) {
+                    writer.write(headers.get(j));
+                    writer.newLine();
+                    writer.write(sequences.get(j));
+                    writer.newLine();
+                }
+            }
+            splitFiles.add(partFile);
+        }
+        return splitFiles;
+    }
+
+    /**
+     * 运行 miranda 命令
+     *
+     * @param queryMirna  miRNA fasta 文件
+     * @param targetFasta 目标转录本 fasta
+     * @param outputFile  输出文件
+     */
+    private static void runMiranda(File queryMirna, File targetFasta, File outputFile)
+            throws IOException, InterruptedException {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("miranda");
+        cmd.add(queryMirna.getAbsolutePath());
+        cmd.add(targetFasta.getAbsolutePath());
+        cmd.add("-sc");      // 使用严格评分（可选）
+        cmd.add("140");
+        cmd.add("-en");
+        cmd.add(String.valueOf(-5.0));
+        cmd.add("-quiet");    // 安静模式，减少输出
+        cmd.add("-out");
+        cmd.add(outputFile.getAbsolutePath());
+
+        // 使用 common_env 环境运行
+        runCondaCommand(CONDA_ENV, cmd.toArray(new String[0]));
+    }
+
+    /**
+     * 合并多个 miranda 输出文件
+     */
+    private static void mergeMirandaResults(List<File> partFiles, File outputFile) throws IOException {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(outputFile))) {
+            for (File part : partFiles) {
+                try (BufferedReader reader = new BufferedReader(new FileReader(part))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        writer.write(line);
+                        writer.newLine();
+                    }
+                }
+            }
         }
     }
 

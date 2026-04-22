@@ -11,7 +11,7 @@ import java.util.List;
 
 public class DownloadSRA {
     public static void download(String sra_txt) {
-        String[] sra = phrase(sra_txt.replaceAll(" ", ""));
+        String[] sra = phrase(sra_txt.replace(" ", ""));
         System.out.println("是否确认下载如下SRA文件: " + Arrays.toString(sra) + "? [y|n]");
         String input = WebConsole.readLine();
         if ("y".equals(input)) {

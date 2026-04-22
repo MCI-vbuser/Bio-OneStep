@@ -367,6 +367,10 @@ def generate_html_report(csv_path, html_path, db_path):
             border-radius: 6px;
             margin-bottom: 20px;
         }}
+        /* 确保所有单元格内容左对齐（包括“Total predictions”列） */
+        table.stat-table td, table.stat-table th {{
+            text-align: left;
+        }}
         table.stat-table td, table.stat-table th {{
             padding: 8px 12px;
             border: 1px solid #30363d;
