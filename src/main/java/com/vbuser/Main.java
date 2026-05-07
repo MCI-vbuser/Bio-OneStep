@@ -409,70 +409,86 @@ public class Main {
      * 运行 miRNA 靶点预测分析（使用 miranda）
      */
     private static void runMiRNAAnalysis() throws IOException, InterruptedException, ExecutionException {
-        // 输出目录
         File mirnaDir = new File("./mirna");
         if (!mirnaDir.exists() && !mirnaDir.mkdirs()) {
             throw new IOException("无法创建目录: " + mirnaDir.getAbsolutePath());
         }
 
-        // 最终结果文件
         File finalResult = new File(mirnaDir, "miranda_results.txt");
-        if (finalResult.exists() && finalResult.length() > 0) {
-            System.out.println("miRNA 靶点预测已完成，结果文件存在: " + finalResult.getAbsolutePath());
+        File fitSummary  = new File(mirnaDir, "fit_summary.json");
+
+        // 若后处理结果已存在，则完全跳过
+        if (fitSummary.exists()) {
+            System.out.println("miRNA 后处理结果已存在，跳过 miRNA 分析。");
             return;
         }
 
-        // 1. 确保目标转录本序列文件存在（从增强 GTF 生成）
-        File targetFasta = ensureTargetFastaForMiRNA();
-        System.out.println("目标转录本序列文件: " + targetFasta.getAbsolutePath());
+        // 若 miranda 结果不存在（或为空），则进行下载、分割、运行 miranda
+        if (!finalResult.exists() || finalResult.length() == 0) {
+            // 1. 确保目标转录本序列文件存在
+            File targetFasta = ensureTargetFastaForMiRNA();
+            System.out.println("目标转录本序列文件: " + targetFasta.getAbsolutePath());
 
-        // 2. 下载并准备人类成熟 miRNA 序列文件
-        File humanMirnaFasta = prepareHumanMirnaFasta(mirnaDir);
-        System.out.println("人类成熟 miRNA 序列文件: " + humanMirnaFasta.getAbsolutePath());
+            // 2. 下载并准备人类成熟 miRNA 序列文件
+            File humanMirnaFasta = prepareHumanMirnaFasta(mirnaDir);
+            System.out.println("人类成熟 miRNA 序列文件: " + humanMirnaFasta.getAbsolutePath());
 
-        // 3. 将 miRNA fasta 分割成 16 份
-        List<File> splitFiles = splitFasta(humanMirnaFasta, mirnaDir);
-        System.out.println("miRNA 序列已分割为 " + splitFiles.size() + " 份");
+            // 3. 分割 miRNA fasta
+            List<File> splitFiles = splitFasta(humanMirnaFasta, mirnaDir);
+            System.out.println("miRNA 序列已分割为 " + splitFiles.size() + " 份");
 
-        // 4. 并行运行 miranda
-        ExecutorService executor = Executors.newFixedThreadPool(16);
-        List<Future<File>> futures = new ArrayList<>();
-        for (int i = 0; i < splitFiles.size(); i++) {
-            final int idx = i;
-            final File splitFile = splitFiles.get(i);
-            Future<File> future = executor.submit(() -> {
-                File outFile = new File(mirnaDir, "miranda_part_" + idx + ".txt");
-                runMiranda(splitFile, targetFasta, outFile);
-                return outFile;
-            });
-            futures.add(future);
-        }
-
-        // 5. 等待所有任务完成并收集输出文件
-        List<File> partResults = new ArrayList<>();
-        for (Future<File> future : futures) {
-            try {
-                partResults.add(future.get());
-            } catch (InterruptedException | ExecutionException e) {
-                System.err.println("miranda 并行任务失败: " + e.getMessage());
-                executor.shutdownNow();
-                throw e;
+            // 4. 并行运行 miranda
+            ExecutorService executor = Executors.newFixedThreadPool(16);
+            List<Future<File>> futures = new ArrayList<>();
+            for (int i = 0; i < splitFiles.size(); i++) {
+                final int idx = i;
+                final File splitFile = splitFiles.get(i);
+                Future<File> future = executor.submit(() -> {
+                    File outFile = new File(mirnaDir, "miranda_part_" + idx + ".txt");
+                    runMiranda(splitFile, targetFasta, outFile);
+                    return outFile;
+                });
+                futures.add(future);
             }
-        }
-        executor.shutdown();
-        ignored = executor.awaitTermination(10, TimeUnit.MINUTES);
 
-        // 6. 合并结果
-        mergeMirandaResults(partResults, finalResult);
-        System.out.println("miRNA 靶点预测完成，合并结果保存至: " + finalResult.getAbsolutePath());
+            // 5. 等待完成并收集结果
+            List<File> partResults = new ArrayList<>();
+            for (Future<File> future : futures) {
+                try {
+                    partResults.add(future.get());
+                } catch (InterruptedException | ExecutionException e) {
+                    System.err.println("miranda 并行任务失败: " + e.getMessage());
+                    executor.shutdownNow();
+                    throw e;
+                }
+            }
+            executor.shutdown();
+            ignored = executor.awaitTermination(10, TimeUnit.MINUTES);
 
-        // 可选：清理临时文件
-        for (File f : splitFiles) {
-            ignored = f.delete();
+            // 6. 合并结果
+            mergeMirandaResults(partResults, finalResult);
+            System.out.println("miRNA 靶点预测完成，合并结果保存至: " + finalResult.getAbsolutePath());
+
+            // 清理临时分割文件和部分结果
+            for (File f : splitFiles) ignored = f.delete();
+            for (File f : partResults) ignored = f.delete();
+        } else {
+            System.out.println("miRNA 靶点预测结果已存在，跳过 miranda 计算。");
         }
-        for (File f : partResults) {
-            ignored = f.delete();
+
+        // 执行后处理流水线（拟合极值分布）
+        File pipelineScript = new File("scripts/mir/pipeline.py");
+        if (!pipelineScript.exists()) {
+            System.err.println("未找到 pipeline.py，跳过后处理。");
+            return;
         }
+
+        System.out.println("开始 miRNA 靶点能量分布拟合分析...");
+        runCondaCommand(CONDA_ENV,
+                "python", pipelineScript.getAbsolutePath(),
+                "--input", finalResult.getAbsolutePath(),
+                "--output-dir", mirnaDir.getAbsolutePath());
+        System.out.println("拟合结果已生成: " + fitSummary.getAbsolutePath());
     }
 
     /**
@@ -611,15 +627,20 @@ public class Main {
         cmd.add("miranda");
         cmd.add(queryMirna.getAbsolutePath());
         cmd.add(targetFasta.getAbsolutePath());
-        cmd.add("-sc");      // 使用严格评分（可选）
+        cmd.add("-go");          // gap open penalty
+        cmd.add("-10.0");
+        cmd.add("-ge");          // gap extend penalty
+        cmd.add("-2.0");
+        cmd.add("-sc");          // score threshold
         cmd.add("140");
-        cmd.add("-en");
-        cmd.add(String.valueOf(-5.0));
-        cmd.add("-quiet");    // 安静模式，减少输出
+        cmd.add("-en");          // energy threshold (kcal/mol)
+        cmd.add("-5.0");
+        cmd.add("-scale");       // scaling parameter
+        cmd.add("5.0");
+        cmd.add("-quiet");
         cmd.add("-out");
         cmd.add(outputFile.getAbsolutePath());
 
-        // 使用 common_env 环境运行
         runCondaCommand(CONDA_ENV, cmd.toArray(new String[0]));
     }
 
